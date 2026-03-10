@@ -164,7 +164,10 @@ class Pipeline:
 
         # --- Output: ShareGPT ---
         if self.cfg.output_sharegpt:
-            entries = build_sharegpt_entries(pid, page_img, regions, self.cfg)
+            sharegpt_images_dir = self.cfg.output_dir / "sharegpt" / "images"
+            entries = build_sharegpt_entries(
+                pid, page_img, regions, self.cfg, sharegpt_images_dir
+            )
             if entries:
                 append_sharegpt(entries, sharegpt_path)
 

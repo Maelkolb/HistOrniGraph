@@ -77,5 +77,5 @@ class PipelineConfig:
 
     def ensure_dirs(self) -> None:
         """Create output sub-directories."""
-        for sub in ("pages", "regions", "md", "pagexml", "sharegpt"):
+        for sub in ("pages", "regions", "md", "pagexml", "sharegpt", "sharegpt/images"):
             (self.output_dir / sub).mkdir(parents=True, exist_ok=True)
