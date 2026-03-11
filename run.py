@@ -59,6 +59,18 @@ def main() -> None:
         "--no-sharegpt", action="store_true", help="Skip ShareGPT JSONL output.",
     )
     parser.add_argument(
+        "--use-glm-ocr", action="store_true",
+        help="Use fine-tuned GLM-OCR for text transcription (requires GPU).",
+    )
+    parser.add_argument(
+        "--glm-ocr-base", default="zai-org/GLM-OCR",
+        help="GLM-OCR base model ID (default: zai-org/GLM-OCR).",
+    )
+    parser.add_argument(
+        "--glm-ocr-lora", default="",
+        help="Path to LoRA adapter directory for GLM-OCR.",
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true", help="Debug logging.",
     )
 
@@ -81,6 +93,9 @@ def main() -> None:
         output_md=not args.no_md,
         output_pagexml=not args.no_pagexml,
         output_sharegpt=not args.no_sharegpt,
+        use_glm_ocr=args.use_glm_ocr,
+        glm_ocr_base_model=args.glm_ocr_base,
+        glm_ocr_lora_path=args.glm_ocr_lora,
     )
 
     pipeline = Pipeline(cfg)

@@ -32,7 +32,7 @@ class Pipeline:
         cfg.ensure_dirs()
         self._init_client()
 
-    # ── Gemini client ───────────────────────────────────────────────────
+    # ── Gemini client + transcriber ─────────────────────────────────────
 
     def _init_client(self) -> None:
         from google import genai
@@ -41,7 +41,27 @@ class Pipeline:
             http_options={"api_version": "v1alpha"},
         )
         self.detector = RegionDetector(self.client, self.cfg)
-        self.transcriber = Transcriber(self.client, self.cfg)
+
+        # Gemini transcriber — always created (used as sole transcriber,
+        # or as fallback for tables/images/objects when GLM-OCR is active).
+        gemini_transcriber = Transcriber(self.client, self.cfg)
+
+        if self.cfg.use_glm_ocr:
+            from .transcriber_glm_ocr import GlmOcrTranscriber
+
+            # GPU model is not thread-safe → force sequential processing
+            if self.cfg.workers > 1:
+                log.warning(
+                    "GLM-OCR runs on GPU → forcing workers=1 (was %d).",
+                    self.cfg.workers,
+                )
+                self.cfg.workers = 1
+
+            self.transcriber = GlmOcrTranscriber(
+                self.cfg, gemini_fallback=gemini_transcriber,
+            )
+        else:
+            self.transcriber = gemini_transcriber
 
     # ── Full run ────────────────────────────────────────────────────────
 

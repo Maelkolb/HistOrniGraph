@@ -2,3 +2,7 @@ google-genai>=1.0.0
 Pillow>=10.0.0
 numpy>=1.24.0
 scipy>=1.11.0       # optional: only needed for --deskew
+
+# Optional: only needed with --use-glm-ocr
+# pip install git+https://github.com/huggingface/transformers.git
+# pip install peft accelerate sentencepiece

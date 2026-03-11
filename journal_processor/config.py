@@ -60,9 +60,15 @@ class PipelineConfig:
     detection_temperature: float = 0.3
     detection_thinking: str = "medium"
 
-    # Transcription
+    # Transcription (Gemini — always used for tables/images/objects)
     transcription_temperature: float = 0.2
     transcription_thinking: str = "low"
+
+    # Transcription (GLM-OCR — used for text regions when enabled)
+    use_glm_ocr: bool = False
+    glm_ocr_base_model: str = "zai-org/GLM-OCR"
+    glm_ocr_lora_path: str = ""              # path to LoRA adapter dir
+    glm_ocr_max_new_tokens: int = 2048
 
     # Output formats (all enabled by default)
     output_md: bool = True
