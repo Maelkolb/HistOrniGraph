@@ -46,7 +46,7 @@ RULES
 
 EXTRA METADATA per region (include in the JSON):  
 • PageNumberRegion → add "page_number": <int or string of the printed number>.  
-• ParagraphRegion / ListRegion / FootnoteRegion / MarginaliaRegion → add \
+• ParagraphRegion / ListRegion / FootnoteRegion → add \
   "line_count": <estimated number of text lines>.  
 • TableRegion → add "rows": <int>, "cols": <int>.
 
