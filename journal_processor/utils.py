@@ -17,11 +17,42 @@ MIME_BY_EXT = {
 
 
 def clean_llm_json(text: str) -> str:
-    """Strip markdown fences and stray whitespace around JSON."""
+    """Extract JSON from LLM output that may contain reasoning/commentary.
+
+    Handles:
+    - Markdown ```json fences
+    - Leading/trailing commentary or thinking text
+    - JSON embedded in the middle of reasoning
+    """
     text = text.strip()
+
+    # Strip markdown fences
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    return text.strip()
+    text = text.strip()
+
+    # If it already starts with { and ends with }, return as-is
+    if text.startswith("{") and text.endswith("}"):
+        return text
+
+    # Try to find a JSON object in the text (first { to last matching })
+    start = text.find("{")
+    if start != -1:
+        # Find the matching closing brace
+        depth = 0
+        end = -1
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    # Don't break — keep going to find the outermost match
+        if end != -1:
+            return text[start:end + 1]
+
+    return text
 
 
 def safe_json_parse(text: str) -> Dict[str, Any]:

@@ -102,29 +102,39 @@ class RegionDetector:
         prompt = DETECTION_PROMPT.format(max_regions=self.cfg.max_regions)
 
         raw = ""
-        try:
-            resp = self.client.models.generate_content(
-                model=self.cfg.model_id,
-                contents=[
-                    types.Part.from_bytes(data=img_bytes, mime_type=mime),
-                    prompt,
-                ],
-                config=types.GenerateContentConfig(
-                    temperature=self.cfg.detection_temperature,
-                    max_output_tokens=4096,
-                    thinking_config=types.ThinkingConfig(
-                        thinking_level=self.cfg.detection_thinking
+        last_exc = None
+        for attempt in range(self.cfg.detection_retries + 1):
+            try:
+                resp = self.client.models.generate_content(
+                    model=self.cfg.model_id,
+                    contents=[
+                        types.Part.from_bytes(data=img_bytes, mime_type=mime),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=self.cfg.detection_temperature,
+                        max_output_tokens=4096,
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=self.cfg.detection_thinking
+                        ),
                     ),
-                ),
-            )
-            raw = clean_llm_json(resp.text)
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            log.error("JSON parse error for %s: %s\nRaw: %s", image_path.name, exc, raw[:400])
-            return self._error(image_path, f"JSON parse: {exc}", raw)
-        except Exception as exc:
-            log.error("Detection failed for %s: %s", image_path.name, exc)
-            return self._error(image_path, str(exc), traceback.format_exc())
+                )
+                raw = clean_llm_json(resp.text)
+                data = json.loads(raw)
+                break  # success
+            except json.JSONDecodeError as exc:
+                last_exc = exc
+                if attempt < self.cfg.detection_retries:
+                    log.warning(
+                        "JSON parse failed for %s (attempt %d/%d), retrying…",
+                        image_path.name, attempt + 1, self.cfg.detection_retries + 1,
+                    )
+                    continue
+                log.error("JSON parse error for %s: %s\nRaw: %s", image_path.name, exc, raw[:400])
+                return self._error(image_path, f"JSON parse: {exc}", raw)
+            except Exception as exc:
+                log.error("Detection failed for %s: %s", image_path.name, exc)
+                return self._error(image_path, str(exc), traceback.format_exc())
 
         regions = self._validate(data.get("regions", []), w, h)
         return {

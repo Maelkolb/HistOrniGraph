@@ -59,6 +59,7 @@ class PipelineConfig:
     region_margin_frac: float = 0.005   # margin added around detected boxes
     detection_temperature: float = 0.3
     detection_thinking: str = "medium"
+    detection_retries: int = 2          # retry on bad JSON from Gemini
 
     # Transcription (Gemini — always used for tables/images/objects)
     transcription_temperature: float = 0.2

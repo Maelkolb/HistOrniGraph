@@ -94,13 +94,19 @@ class GlmOcrTranscriber:
             image.save(tmp_path, format="PNG")
             os.close(fd)
 
-            # Build messages matching the fine-tuning chat format exactly:
-            #   system: "Transcribe the german text in this image region."
-            #   user:   <image> + "Region type: ParagraphRegion"
+            # Build messages matching the fine-tuning chat format.
+            #
+            # IMPORTANT: the GLM-OCR processor's chat template iterates
+            # over each message's "content" expecting a *list* of typed
+            # content parts (dicts with "type" keys).  Passing a plain
+            # string causes "string indices must be integers" errors.
+            # So even the system message must use list-of-dicts format.
             messages = [
                 {
                     "role": "system",
-                    "content": self.cfg.sharegpt_system_prompt,
+                    "content": [
+                        {"type": "text", "text": self.cfg.sharegpt_system_prompt},
+                    ],
                 },
                 {
                     "role": "user",
