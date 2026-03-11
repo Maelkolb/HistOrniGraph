@@ -22,6 +22,18 @@ from .config import PipelineConfig, TEXT_REGION_TYPES
 
 log = logging.getLogger(__name__)
 
+_MAX_LONG_EDGE = 1344
+
+
+def _resize_if_needed(image: Image.Image, max_long_edge: int) -> Image.Image:
+    w, h = image.size
+    long_edge = max(w, h)
+    if long_edge <= max_long_edge:
+        return image
+    scale = max_long_edge / long_edge
+    new_w, new_h = int(w * scale), int(h * scale)
+    log.debug("Resizing region crop %dx%d → %dx%d", w, h, new_w, new_h)
+    return image.resize((new_w, new_h), Image.LANCZOS)
 
 class GlmOcrTranscriber:
     """Drop-in replacement for :class:`Transcriber`.
@@ -86,6 +98,8 @@ class GlmOcrTranscriber:
         region: Dict[str, Any],
     ) -> Dict[str, Any]:
         rtype = region["type"]
+        # Downscale large crops to prevent CUDA OOM on T4
+        image = _resize_if_needed(image, _MAX_LONG_EDGE)
 
         # Write image to a temp file — the HF processor resolves file paths
         # more reliably than raw PIL objects for this model.
@@ -93,14 +107,6 @@ class GlmOcrTranscriber:
         try:
             image.save(tmp_path, format="PNG")
             os.close(fd)
-
-            # Build messages matching the fine-tuning chat format.
-            #
-            # IMPORTANT: the GLM-OCR processor's chat template iterates
-            # over each message's "content" expecting a *list* of typed
-            # content parts (dicts with "type" keys).  Passing a plain
-            # string causes "string indices must be integers" errors.
-            # So even the system message must use list-of-dicts format.
             messages = [
                 {
                     "role": "system",
