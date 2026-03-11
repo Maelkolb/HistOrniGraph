@@ -144,7 +144,7 @@ class Transcriber:
                 ],
                 config=types.GenerateContentConfig(
                     temperature=self.cfg.transcription_temperature,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     thinking_config=types.ThinkingConfig(
                         thinking_level=self.cfg.transcription_thinking
                     ),
