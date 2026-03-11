@@ -113,7 +113,7 @@ class RegionDetector:
                     ],
                     config=types.GenerateContentConfig(
                         temperature=self.cfg.detection_temperature,
-                        max_output_tokens=4096,
+                        max_output_tokens=16384,
                         thinking_config=types.ThinkingConfig(
                             thinking_level=self.cfg.detection_thinking
                         ),
