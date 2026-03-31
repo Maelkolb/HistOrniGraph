@@ -1,8 +1,15 @@
-"""Generate Markdown reconstruction of each page."""
+"""Generate Markdown reconstruction of each page.
+
+MarginaliaRegion is intentionally excluded from Markdown output — marginalia
+are peripheral annotations that clutter reading flow.  They remain present in
+PageXML, ShareGPT, and the regions JSON.
+"""
 
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
+
+from .config import MD_EXCLUDED_TYPES
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +33,15 @@ def generate_md(
 
     for r in sorted(regions, key=lambda r: r["reading_order"]):
         rtype = r["type"]
+
+        # Skip types excluded from MD output (e.g. MarginaliaRegion)
+        if rtype in MD_EXCLUDED_TYPES:
+            continue
+
+        # Skip folded inserts — nothing readable to render
+        if r.get("insert_state") == "folded":
+            continue
+
         text = r.get("transcription", {}).get("text", "")
         if not text:
             continue
@@ -34,10 +50,8 @@ def generate_md(
             # Already used in header; skip body
             continue
 
-        if rtype in ("ParagraphRegion", "ListRegion", "FootnoteRegion", "MarginaliaRegion"):
-            if rtype == "MarginaliaRegion":
-                lines.append(f"> *[Marginalia]* {text}")
-            elif rtype == "FootnoteRegion":
+        if rtype in ("ParagraphRegion", "ListRegion", "FootnoteRegion"):
+            if rtype == "FootnoteRegion":
                 lines.append(f"[^footnote]: {text}")
             else:
                 lines.append(text)

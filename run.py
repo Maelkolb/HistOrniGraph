@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Run the journal processing pipeline.
 
-Usage:
+Default mode (auto_mode):
     python run.py --input /path/to/scans --output /path/to/output
+
+Force split-only (old workflow):
+    python run.py --input … --output … --no-auto --split
+
+Force double-page (no split):
+    python run.py --input … --output … --no-auto --double-page
 
 Requires:
     - GOOGLE_API_KEY environment variable set
@@ -19,11 +25,12 @@ from journal_processor import Pipeline, PipelineConfig
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Process digitised double-page journal scans."
+        description="Process digitised journal scans.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--input", "-i", required=True, type=Path,
-        help="Directory containing double-page scan images.",
+        help="Directory containing scan images.",
     )
     parser.add_argument(
         "--output", "-o", required=True, type=Path,
@@ -37,9 +44,37 @@ def main() -> None:
         "--workers", "-w", type=int, default=4,
         help="Parallel page-processing threads (default: 4).",
     )
+
+    # Processing mode
+    mode_group = parser.add_argument_group("processing mode (default: auto)")
+    mode_group.add_argument(
+        "--no-auto", action="store_true",
+        help=(
+            "Disable agentic scan analysis.  Must be combined with --split or "
+            "--double-page to choose a fixed mode for all scans."
+        ),
+    )
+    mode_group.add_argument(
+        "--split", action="store_true",
+        help=(
+            "Force split mode: all scans are cut down the centre into left/right "
+            "pages before detection.  Only used with --no-auto."
+        ),
+    )
+    mode_group.add_argument(
+        "--double-page", action="store_true",
+        help=(
+            "Force double-page mode: all scans are sent to the detector unsplit. "
+            "Only used with --no-auto."
+        ),
+    )
+
     parser.add_argument(
-        "--max-regions", type=int, default=5,
-        help="Maximum regions per page (default: 5).",
+        "--max-regions", type=int, default=None,
+        help=(
+            "Maximum regions per image. "
+            "Defaults: 5 for split images, 10 for double-page/unsplit images."
+        ),
     )
     parser.add_argument(
         "--deskew", action="store_true",
@@ -76,18 +111,28 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Validate mode flags
+    if args.split and args.double_page:
+        parser.error("--split and --double-page are mutually exclusive.")
+    if (args.split or args.double_page) and not args.no_auto:
+        parser.error("--split and --double-page require --no-auto.")
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%H:%M:%S",
     )
 
-    cfg = PipelineConfig(
+    auto_mode = not args.no_auto
+    double_page_mode = args.double_page  # only meaningful when auto_mode=False
+
+    cfg_kwargs: dict = dict(
         input_dir=args.input,
         output_dir=args.output,
         model_id=args.model,
         workers=args.workers,
-        max_regions=args.max_regions,
+        auto_mode=auto_mode,
+        double_page_mode=double_page_mode,
         deskew=args.deskew,
         enhance_contrast=args.enhance_contrast,
         output_md=not args.no_md,
@@ -97,6 +142,10 @@ def main() -> None:
         glm_ocr_base_model=args.glm_ocr_base,
         glm_ocr_lora_path=args.glm_ocr_lora,
     )
+    if args.max_regions is not None:
+        cfg_kwargs["max_regions"] = args.max_regions
+
+    cfg = PipelineConfig(**cfg_kwargs)
 
     pipeline = Pipeline(cfg)
     summary = pipeline.run()

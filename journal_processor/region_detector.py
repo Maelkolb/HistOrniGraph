@@ -1,7 +1,13 @@
 """Region detection using Gemini 3 Flash Preview.
 
-Detects layout regions in single journal pages and returns bounding boxes
-with metadata (page numbers, line counts, table dimensions).
+Two prompt variants:
+  DETECTION_PROMPT        – single-page (after splitting, or a single-page scan)
+  DETECTION_PROMPT_DOUBLE – full double-page scan (with insert awareness)
+
+The double-page prompt enforces:
+  • Each physical insert is ONE region (no sub-region splitting by content type)
+  • Folded inserts get a dedicated region with insert_state="folded" so the
+    transcriber can skip them gracefully
 """
 
 import json
@@ -18,8 +24,10 @@ from .utils import MIME_BY_EXT, clean_llm_json
 log = logging.getLogger(__name__)
 
 
-# ── Prompt ──────────────────────────────────────────────────────────────────
+# ── Prompts ──────────────────────────────────────────────────────────────────
 
+# Single-page prompt — used after the scan has been split into L/R halves,
+# or when the analyser determines the scan is already a single page.
 DETECTION_PROMPT = """\
 You are a document-layout analyst for digitised pages of a German ornithologist's \
 handwritten/printed field journal (19th–20th century).
@@ -30,30 +38,104 @@ typically begins with a date and city/location name.  Do NOT split a single \
 entry across multiple regions unless it clearly changes type (e.g. a table \
 inside an entry).
 
-COORDINATE SYSTEM  
-Normalised 0–1000 scale.  (0, 0) = top-left, (1000, 1000) = bottom-right.  
+COORDINATE SYSTEM
+Normalised 0–1000 scale.  (0, 0) = top-left, (1000, 1000) = bottom-right.
 bbox format: {{"x": left, "y": top, "width": w, "height": h}}
 
-REGION TYPES (use exactly these names):  
+REGION TYPES (use exactly these names):
 ParagraphRegion · ListRegion · TableRegion · ObjectRegion · PageNumberRegion · \
 MarginaliaRegion · FootnoteRegion · ImageRegion
 
-RULES  
-1. Maximum {max_regions} regions per page – merge small adjacent blocks of the \
-   same type rather than creating many tiny regions.  
-2. Tight bounding boxes, no overlaps.  
+INSERT SHEETS
+If a loose insert sheet is partially visible in this half-page, treat its entire
+visible content as a single region (do not subdivide it) and add:
+  "page_side": "insert", "insert_id": 1, "insert_state": "visible"
+If the insert is folded and unreadable, use type "ObjectRegion" and add:
+  "page_side": "insert", "insert_id": 1, "insert_state": "folded"
+
+RULES
+1. Maximum {max_regions} regions – merge small adjacent blocks of the same type.
+2. Tight bounding boxes, no overlaps.
 3. Reading order = natural top-to-bottom, left-to-right sequence.
 
-EXTRA METADATA per region (include in the JSON):  
-• PageNumberRegion → add "page_number": <int or string of the printed number>.  
-• ParagraphRegion / ListRegion / FootnoteRegion → add \
-  "line_count": <estimated number of text lines>.  
-• TableRegion → add "rows": <int>, "cols": <int>.
+EXTRA METADATA per region:
+• PageNumberRegion → "page_number": <int or string>.
+• ParagraphRegion / ListRegion / FootnoteRegion → "line_count": <int>.
+• TableRegion → "rows": <int>, "cols": <int>.
 
 OUTPUT (JSON only, no commentary):
 {{"regions": [
   {{"id": "r1", "type": "…", "bbox": {{"x":…,"y":…,"width":…,"height":…}}, \
 "reading_order": 1, …metadata…}},
+  …
+], "total_regions": N}}
+"""
+
+# Double-page prompt — used when the full unsplit scan is sent to the detector.
+DETECTION_PROMPT_DOUBLE = """\
+You are a document-layout analyst for digitised double-page scans of a German \
+ornithologist's handwritten/printed field journal (19th–20th century).
+
+CONTEXT
+This image contains TWO journal pages side by side (left page and right page).
+It may also contain loose INSERT sheets — separate pieces of paper tucked inside
+the journal that overlap one or both main pages.
+
+TASK: Detect every distinct content region across BOTH pages and any inserts,
+then return precise bounding boxes with metadata.  Keep whole journal entries
+together — an entry typically begins with a date and city/location name.  Do NOT
+split a single entry across multiple regions unless it clearly changes type
+(e.g. a table inside an entry).
+
+COORDINATE SYSTEM
+Normalised 0–1000 scale.  (0, 0) = top-left, (1000, 1000) = bottom-right.
+bbox format: {{"x": left, "y": top, "width": w, "height": h}}
+
+REGION TYPES (use exactly these names):
+ParagraphRegion · ListRegion · TableRegion · ObjectRegion · PageNumberRegion · \
+MarginaliaRegion · FootnoteRegion · ImageRegion
+
+PAGE ASSIGNMENT — required for every region:
+• "page_side": "left" | "right" | "insert"
+  – "left"   → belongs to the left-hand main page
+  – "right"  → belongs to the right-hand main page
+  – "insert" → belongs to a loose insert sheet
+
+INSERT RULES — read carefully:
+① Group all content from the SAME physical insert under one "insert_id" integer
+  (insert_id: 1, 2, …).
+② A FULLY VISIBLE insert (readable content) whose area is large (e.g. covers
+  most of one page) MUST be captured as a SINGLE region with one bounding box
+  that encloses the entire insert — do NOT subdivide it into separate paragraph /
+  table / image sub-regions.  Use the dominant content type as the region type.
+③ A FOLDED insert (showing only its back or blank/exterior side — no readable
+  text) → create exactly ONE region with:
+    type: "ObjectRegion", page_side: "insert", insert_id: <n>,
+    insert_state: "folded"
+  Do NOT create sub-regions inside a folded insert.
+④ A smaller insert (business-card sized or occupying less than ~15 % of the
+  image) may be broken into content sub-regions, but keep them few and sensible.
+
+INSERT STATE — required for every insert region:
+• "insert_state": "visible"  → readable content
+• "insert_state": "folded"   → back/exterior only, not readable
+
+RULES
+1. Maximum {max_regions} regions total across both pages and all inserts.
+   Merge small adjacent same-type blocks rather than creating many tiny regions.
+2. Tight bounding boxes, no overlaps.
+3. Reading order = left-to-right, top-to-bottom
+   (left page first, then right page, inserts interleaved by their position).
+
+EXTRA METADATA per region:
+• PageNumberRegion → "page_number": <int or string>.
+• ParagraphRegion / ListRegion / FootnoteRegion → "line_count": <int>.
+• TableRegion → "rows": <int>, "cols": <int>.
+
+OUTPUT (JSON only, no commentary):
+{{"regions": [
+  {{"id": "r1", "type": "…", "page_side": "left", \
+"bbox": {{"x":…,"y":…,"width":…,"height":…}}, "reading_order": 1, …metadata…}},
   …
 ], "total_regions": N}}
 """
@@ -82,16 +164,37 @@ class RegionDetector:
 
     # ── main entry point ────────────────────────────────────────────────
 
-    def detect(self, image_path: Path) -> Dict[str, Any]:
-        """Run region detection on a single page image.
+    def detect(
+        self,
+        image_path: Path,
+        use_double_page: Optional[bool] = None,
+        max_regions: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Run region detection on a page image.
+
+        Parameters
+        ----------
+        image_path:
+            Path to the image to analyse.
+        use_double_page:
+            Override whether to use the double-page prompt for this specific
+            call.  When None, falls back to cfg.double_page_mode (or False
+            when auto_mode is True, since the pipeline passes the value
+            explicitly for each scan).
 
         Returns a dict with keys:
             status, image_path, image_dimensions, regions, total_regions,
             reading_order, region_types_detected
         Each region carries: id, type, bbox (pixel coords), reading_order,
-        and type-specific metadata (page_number / line_count / rows+cols).
+        and type-specific metadata.  Double-page / insert regions also carry
+        page_side, insert_id, insert_state.
         """
         from google.genai import types
+
+        # Resolve settings for this call
+        if use_double_page is None:
+            use_double_page = self.cfg.double_page_mode
+        effective_max = max_regions if max_regions is not None else self.cfg.max_regions
 
         img = Image.open(image_path).convert("RGB")
         w, h = img.size
@@ -99,10 +202,12 @@ class RegionDetector:
         mime = MIME_BY_EXT.get(ext, "image/png")
         img_bytes = image_path.read_bytes()
 
-        prompt = DETECTION_PROMPT.format(max_regions=self.cfg.max_regions)
+        if use_double_page:
+            prompt = DETECTION_PROMPT_DOUBLE.format(max_regions=effective_max)
+        else:
+            prompt = DETECTION_PROMPT.format(max_regions=effective_max)
 
         raw = ""
-        last_exc = None
         for attempt in range(self.cfg.detection_retries + 1):
             try:
                 resp = self.client.models.generate_content(
@@ -123,7 +228,6 @@ class RegionDetector:
                 data = json.loads(raw)
                 break  # success
             except json.JSONDecodeError as exc:
-                last_exc = exc
                 if attempt < self.cfg.detection_retries:
                     log.warning(
                         "JSON parse failed for %s (attempt %d/%d), retrying…",
@@ -136,7 +240,7 @@ class RegionDetector:
                 log.error("Detection failed for %s: %s", image_path.name, exc)
                 return self._error(image_path, str(exc), traceback.format_exc())
 
-        regions = self._validate(data.get("regions", []), w, h)
+        regions = self._validate(data.get("regions", []), w, h, use_double_page, effective_max)
         return {
             "status": "success",
             "image_path": str(image_path),
@@ -149,11 +253,19 @@ class RegionDetector:
 
     # ── validation / normalisation ──────────────────────────────────────
 
+    _VALID_PAGE_SIDES = {"left", "right", "insert"}
+    _VALID_INSERT_STATES = {"visible", "folded"}
+
     def _validate(
-        self, raw_regions: List[Dict], img_w: int, img_h: int
+        self,
+        raw_regions: List[Dict],
+        img_w: int,
+        img_h: int,
+        double_page_context: bool,
+        max_regions: int,
     ) -> List[Dict]:
         out: List[Dict] = []
-        for i, r in enumerate(raw_regions[: self.cfg.max_regions]):
+        for i, r in enumerate(raw_regions[:max_regions]):
             rtype = self._normalise_type(r.get("type", "ParagraphRegion"))
             bbox = r.get("bbox", {})
 
@@ -175,6 +287,20 @@ class RegionDetector:
                 "bbox": pixel_bbox,
                 "reading_order": int(r.get("reading_order", i + 1)),
             }
+
+            # Page / insert assignment fields (present in both prompts for inserts)
+            raw_side = str(r.get("page_side", "")).lower()
+            if raw_side in self._VALID_PAGE_SIDES:
+                entry["page_side"] = raw_side
+            elif double_page_context:
+                entry["page_side"] = "left"   # safe fallback in double-page mode
+
+            if entry.get("page_side") == "insert":
+                entry["insert_id"] = int(r.get("insert_id", 1))
+                raw_state = str(r.get("insert_state", "visible")).lower()
+                entry["insert_state"] = (
+                    raw_state if raw_state in self._VALID_INSERT_STATES else "visible"
+                )
 
             # type-specific metadata
             if rtype == "PageNumberRegion":

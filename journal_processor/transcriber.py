@@ -102,6 +102,16 @@ class Transcriber:
                 "status": "success",
                 "text": str(region.get("page_number", "")),
                 "skipped": True,
+                "skip_reason": "page_number_from_detection",
+            }
+
+        # Folded insert – content is not visible; skip transcription
+        if region.get("insert_state") == "folded":
+            return {
+                "status": "success",
+                "text": "",
+                "skipped": True,
+                "skip_reason": "folded_insert",
             }
 
         prompt = self._build_prompt(region)
