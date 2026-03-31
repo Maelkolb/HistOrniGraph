@@ -29,6 +29,7 @@ SESSION PERSISTENCE:
 
 VALIDATION:
     - Mark pages as "Done" after correcting transcription
+    - Mark pages as "Redo" to flag them for reprocessing
     - Automatic CER (Character Error Rate) and WER (Word Error Rate)
       calculation between original and corrected text
     - Metrics are displayed inline and saved to the exported JSON
@@ -1001,6 +1002,41 @@ def generate_html(data):
     border-color: #2e6636;
   }
 
+  /* ── REDO BUTTON ── */
+  .redo-btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .redo-btn:hover {
+    border-color: var(--warning);
+    color: var(--warning);
+    background: var(--warning-subtle);
+  }
+
+  .redo-btn.is-redo {
+    border-color: var(--warning);
+    background: var(--warning);
+    color: #fff;
+    font-weight: 500;
+  }
+
+  .redo-btn.is-redo:hover {
+    background: #a36812;
+    border-color: #a36812;
+  }
+
   .metrics-bar {
     flex-shrink: 0;
     background: var(--success-subtle);
@@ -1056,9 +1092,13 @@ def generate_html(data):
     color: var(--text-muted);
   }
 
-  /* ── PAGE SELECT done indicator ── */
+  /* ── PAGE SELECT done/redo indicators ── */
   .page-select option.opt-done {
     color: var(--success);
+  }
+
+  .page-select option.opt-redo {
+    color: var(--warning);
   }
 
   /* ── STATUS BAR ── */
@@ -1261,6 +1301,10 @@ def generate_html(data):
       <span>Transcription</span>
       <div class="panel-header-right">
         <span id="charCount" style="font-size:10px"></span>
+        <button class="redo-btn" id="btnRedo" title="Flag this page for reprocessing (Shift+D)">
+          <span id="redoIcon">&#9744;</span>
+          <span id="redoLabel">Redo</span>
+        </button>
         <button class="done-btn" id="btnDone" title="Mark this page as validated (D)">
           <span id="doneIcon">&#9744;</span>
           <span id="doneLabel">Mark done</span>
@@ -1306,6 +1350,7 @@ def generate_html(data):
   <span style="margin-left:auto">
     <kbd>&#8592;</kbd><kbd>&#8594;</kbd> nav &nbsp;
     <kbd>D</kbd> done &nbsp;
+    <kbd>Shift+D</kbd> redo &nbsp;
     <kbd>R</kbd> regions &nbsp;
     <kbd>F</kbd> fit &nbsp;
     <kbd>+</kbd><kbd>-</kbd> zoom
@@ -1324,6 +1369,7 @@ let zoom = 1, panX = 0, panY = 0;
 let isPanning = false, panStartX = 0, panStartY = 0;
 let edits = {};      // { stem: editedText }  — only stores pages that differ from original
 let donePages = {};  // { stem: { cer, wer, charEdits, wordEdits, doneAt } }
+let redoPages = {};  // { stem: { markedAt } }  — pages flagged for reprocessing
 let activeTab = 'edit';
 let pageLoaded = false;
 let autoSaveTimer = null;
@@ -1341,6 +1387,7 @@ const btnFitWidth = $('btnFitWidth');
 const btnExport = $('btnExport');
 const btnImport = $('btnImport');
 const btnDone = $('btnDone');
+const btnRedo = $('btnRedo');
 const sessionFileInput = $('sessionFileInput');
 const restoreBanner = $('restoreBanner');
 const bannerText = $('bannerText');
@@ -1368,6 +1415,8 @@ const metricEdits = $('metricEdits');
 const doneTimestamp = $('doneTimestamp');
 const doneIcon = $('doneIcon');
 const doneLabel = $('doneLabel');
+const redoIcon = $('redoIcon');
+const redoLabel = $('redoLabel');
 const progressBarFill = $('progressBarFill');
 const progressText = $('progressText');
 
@@ -1489,10 +1538,11 @@ function togglePageDone() {
       doneAt: new Date().toISOString()
     };
 
-    showToast('Page ' + (currentPageIdx + 1) + ' done — CER ' + formatRate(cerResult.cer) + ', WER ' + formatRate(werResult.wer));
+    showToast('Page ' + (currentPageIdx + 1) + ' done \u2014 CER ' + formatRate(cerResult.cer) + ', WER ' + formatRate(werResult.wer));
   }
 
   updateDoneDisplay();
+  updateRedoDisplay();
   updateProgress();
   updatePageSelectLabels();
   scheduleAutoSave();
@@ -1536,12 +1586,55 @@ function updateDoneDisplay() {
   }
 }
 
+// ══════════════════════════════════════════════════════════
+// MARK AS REDO
+// ══════════════════════════════════════════════════════════
+
+function togglePageRedo() {
+  saveCurrentEdits();
+  var page = DATA.pages[currentPageIdx];
+  var stem = page.stem;
+
+  if (redoPages[stem]) {
+    delete redoPages[stem];
+    showToast('Page ' + (currentPageIdx + 1) + ' redo flag removed');
+  } else {
+    redoPages[stem] = {
+      markedAt: new Date().toISOString()
+    };
+    showToast('Page ' + (currentPageIdx + 1) + ' flagged for redo');
+  }
+
+  updateRedoDisplay();
+  updateProgress();
+  updatePageSelectLabels();
+  scheduleAutoSave();
+}
+
+function updateRedoDisplay() {
+  var page = DATA.pages[currentPageIdx];
+  var isRedo = !!redoPages[page.stem];
+
+  if (isRedo) {
+    btnRedo.classList.add('is-redo');
+    redoIcon.innerHTML = '&#9745;';
+    redoLabel.textContent = 'Redo';
+  } else {
+    btnRedo.classList.remove('is-redo');
+    redoIcon.innerHTML = '&#9744;';
+    redoLabel.textContent = 'Redo';
+  }
+}
+
 function updateProgress() {
   var total = DATA.pages.length;
   var done = Object.keys(donePages).length;
+  var redo = Object.keys(redoPages).length;
   var pct = total > 0 ? (done / total * 100) : 0;
   progressBarFill.style.width = pct.toFixed(1) + '%';
-  progressText.textContent = done + ' / ' + total + ' done';
+  var txt = done + ' / ' + total + ' done';
+  if (redo > 0) txt += ', ' + redo + ' redo';
+  progressText.textContent = txt;
 }
 
 function updatePageSelectLabels() {
@@ -1549,12 +1642,14 @@ function updatePageSelectLabels() {
   for (var i = 0; i < options.length; i++) {
     var stem = DATA.pages[i].stem;
     var isDone = !!donePages[stem];
-    options[i].textContent = (isDone ? '\u2713 ' : '') + stem;
-    if (isDone) {
-      options[i].classList.add('opt-done');
-    } else {
-      options[i].classList.remove('opt-done');
-    }
+    var isRedo = !!redoPages[stem];
+    var prefix = '';
+    if (isDone && isRedo) prefix = '\u2713\u21bb ';
+    else if (isDone) prefix = '\u2713 ';
+    else if (isRedo) prefix = '\u21bb ';
+    options[i].textContent = prefix + stem;
+    options[i].classList.toggle('opt-done', isDone && !isRedo);
+    options[i].classList.toggle('opt-redo', isRedo);
   }
 }
 
@@ -1573,9 +1668,11 @@ function buildSessionObject(pageIdx) {
       lastPage: pageIdx !== undefined ? pageIdx : currentPageIdx,
       savedAt: new Date().toISOString(),
       editCount: Object.keys(edits).length,
-      doneCount: Object.keys(donePages).length
+      doneCount: Object.keys(donePages).length,
+      redoCount: Object.keys(redoPages).length
     },
-    _donePages: {}
+    _donePages: {},
+    _redoPages: {}
   };
   // Copy only modified pages
   Object.keys(edits).forEach(function(stem) {
@@ -1584,6 +1681,10 @@ function buildSessionObject(pageIdx) {
   // Copy done pages with their metrics
   Object.keys(donePages).forEach(function(stem) {
     session._donePages[stem] = donePages[stem];
+  });
+  // Copy redo pages
+  Object.keys(redoPages).forEach(function(stem) {
+    session._redoPages[stem] = redoPages[stem];
   });
   return session;
 }
@@ -1626,10 +1727,11 @@ function applySession(session, source) {
   var meta = session._session || {};
   var restoredEdits = 0;
   var restoredDone = 0;
+  var restoredRedo = 0;
 
   // Rebuild edits dict from the session
   Object.keys(session).forEach(function(key) {
-    if (key === '_session' || key === '_donePages') return;
+    if (key === '_session' || key === '_donePages' || key === '_redoPages') return;
     // Value is either a plain string (new format) or {edited, ...} object (export format)
     var val = session[key];
     if (typeof val === 'string') {
@@ -1652,6 +1754,14 @@ function applySession(session, source) {
     });
   }
 
+  // Rebuild redoPages from session
+  if (session._redoPages) {
+    Object.keys(session._redoPages).forEach(function(stem) {
+      redoPages[stem] = session._redoPages[stem];
+      restoredRedo++;
+    });
+  }
+
   var targetPage = (meta.lastPage !== undefined) ? parseInt(meta.lastPage) : 0;
   targetPage = Math.max(0, Math.min(targetPage, DATA.pages.length - 1));
 
@@ -1661,7 +1771,7 @@ function applySession(session, source) {
   updateProgress();
   updatePageSelectLabels();
 
-  var msg = '\u2713 Session restored \u2014 ' + restoredEdits + ' edit(s), ' + restoredDone + ' done, page ' + (targetPage + 1);
+  var msg = '\u2713 Session restored \u2014 ' + restoredEdits + ' edit(s), ' + restoredDone + ' done, ' + restoredRedo + ' redo, page ' + (targetPage + 1);
   showToast(msg, 3500);
   autoSaveToLocalStorage(); // persist merged state immediately
 }
@@ -1676,8 +1786,8 @@ function checkLocalStorageSession() {
     var session = JSON.parse(raw);
     var meta = session._session;
     if (!meta || meta.bookName !== DATA.bookName) return;
-    if (Object.keys(session).filter(function(k) { return k !== '_session' && k !== '_donePages'; }).length === 0 &&
-        meta.editCount === 0 && (!meta.doneCount || meta.doneCount === 0)) return; // nothing to restore
+    if (Object.keys(session).filter(function(k) { return k !== '_session' && k !== '_donePages' && k !== '_redoPages'; }).length === 0 &&
+        meta.editCount === 0 && (!meta.doneCount || meta.doneCount === 0) && (!meta.redoCount || meta.redoCount === 0)) return; // nothing to restore
 
     // Format the saved timestamp nicely
     var savedAt = '';
@@ -1689,10 +1799,13 @@ function checkLocalStorageSession() {
 
     var editCount = meta.editCount || 0;
     var doneCount = meta.doneCount || 0;
+    var redoCount = meta.redoCount || 0;
     var lastPageNum = (meta.lastPage !== undefined) ? meta.lastPage + 1 : '?';
+    var details = editCount + ' edited, ' + doneCount + ' done';
+    if (redoCount > 0) details += ', ' + redoCount + ' redo';
     bannerText.innerHTML =
       'Auto-save found from <strong>' + savedAt + '</strong> \u2014 ' +
-      editCount + ' edited, ' + doneCount + ' done, last on page <strong>' + lastPageNum + '</strong>.';
+      details + ', last on page <strong>' + lastPageNum + '</strong>.';
 
     // Store for restore button
     restoreBanner._sessionData = session;
@@ -1777,6 +1890,7 @@ function loadPage(idx) {
   updateCharCount(md);
   updateDirtyState();
   updateDoneDisplay();
+  updateRedoDisplay();
   pageLoaded = true;
 
   // Auto-save position change (debounced so rapid nav doesn't hammer storage)
@@ -1916,7 +2030,7 @@ function updateDirtyState() {
 }
 
 // ══════════════════════════════════════════════════════════
-// EXPORT — enhanced to include session metadata + metrics
+// EXPORT — enhanced to include session metadata + metrics + redo
 // ══════════════════════════════════════════════════════════
 
 function exportEdits() {
@@ -1927,14 +2041,21 @@ function exportEdits() {
       lastPage: currentPageIdx,
       exportedAt: new Date().toISOString(),
       editCount: Object.keys(edits).length,
-      doneCount: Object.keys(donePages).length
+      doneCount: Object.keys(donePages).length,
+      redoCount: Object.keys(redoPages).length
     },
-    _donePages: {}
+    _donePages: {},
+    _redoPages: {}
   };
 
   // Copy done pages with metrics
   Object.keys(donePages).forEach(function(stem) {
     output._donePages[stem] = donePages[stem];
+  });
+
+  // Copy redo pages
+  Object.keys(redoPages).forEach(function(stem) {
+    output._redoPages[stem] = redoPages[stem];
   });
 
   // Compute aggregate metrics across all done pages
@@ -1951,6 +2072,7 @@ function exportEdits() {
     output._session.aggregateMetrics = {
       totalPages: DATA.pages.length,
       donePages: Object.keys(donePages).length,
+      redoPages: Object.keys(redoPages).length,
       microCER: totalCerRef > 0 ? totalCerDist / totalCerRef : 0,
       microWER: totalWerRef > 0 ? totalWerDist / totalWerRef : 0,
       totalCharEdits: totalCerDist,
@@ -1974,6 +2096,18 @@ function exportEdits() {
       if (donePages[p.stem]) {
         output[p.stem].metrics = donePages[p.stem];
       }
+      // Attach redo flag if set
+      if (redoPages[p.stem]) {
+        output[p.stem].redo = redoPages[p.stem];
+      }
+    } else if (redoPages[p.stem]) {
+      // Page not edited but flagged for redo — still include it
+      output[p.stem] = {
+        original: p.markdown,
+        edited: p.markdown,
+        modified: false,
+        redo: redoPages[p.stem]
+      };
     }
   });
   var blob = new Blob([JSON.stringify(output, null, 2)], { type: 'application/json' });
@@ -1983,7 +2117,9 @@ function exportEdits() {
   a.download = DATA.bookName + '_edits.json';
   a.click();
   URL.revokeObjectURL(url);
-  showToast('Exported ' + modCount + ' modified, ' + Object.keys(donePages).length + ' done page(s)');
+  var parts = [modCount + ' modified', Object.keys(donePages).length + ' done'];
+  if (Object.keys(redoPages).length > 0) parts.push(Object.keys(redoPages).length + ' redo');
+  showToast('Exported ' + parts.join(', ') + ' page(s)');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2007,10 +2143,22 @@ function importSessionFromFile(file) {
       if (!session._donePages) {
         session._donePages = {};
         Object.keys(session).forEach(function(key) {
-          if (key === '_session' || key === '_donePages') return;
+          if (key === '_session' || key === '_donePages' || key === '_redoPages') return;
           var val = session[key];
           if (val && val.metrics) {
             session._donePages[key] = val.metrics;
+          }
+        });
+      }
+
+      // If import format has redo flags embedded in page entries, extract them
+      if (!session._redoPages) {
+        session._redoPages = {};
+        Object.keys(session).forEach(function(key) {
+          if (key === '_session' || key === '_donePages' || key === '_redoPages') return;
+          var val = session[key];
+          if (val && val.redo) {
+            session._redoPages[key] = val.redo;
           }
         });
       }
@@ -2102,6 +2250,9 @@ function setupEvents() {
   // Done button
   btnDone.addEventListener('click', togglePageDone);
 
+  // Redo button
+  btnRedo.addEventListener('click', togglePageRedo);
+
   // Import: open file picker
   btnImport.addEventListener('click', function() { sessionFileInput.click(); });
   sessionFileInput.addEventListener('change', function(e) {
@@ -2127,9 +2278,10 @@ function setupEvents() {
     if (e.target === editorTextarea) return;
     if (e.key === 'ArrowLeft') { loadPage(currentPageIdx - 1); e.preventDefault(); }
     if (e.key === 'ArrowRight') { loadPage(currentPageIdx + 1); e.preventDefault(); }
-    if (e.key === 'r' || e.key === 'R') btnRegions.click();
+    if (e.key === 'r' || e.key === 'R') { if (!e.shiftKey) btnRegions.click(); }
     if (e.key === 'f' || e.key === 'F') fitToWidth();
-    if (e.key === 'd' || e.key === 'D') togglePageDone();
+    if ((e.key === 'd' || e.key === 'D') && e.shiftKey) { togglePageRedo(); e.preventDefault(); }
+    else if (e.key === 'd' || e.key === 'D') togglePageDone();
     if (e.key === '+' || e.key === '=') zoomTo(zoom * 1.3);
     if (e.key === '-') zoomTo(zoom / 1.3);
     if (e.key === '0') { zoom = 1; panX = 0; panY = 0; updateTransform(); }
@@ -2228,8 +2380,9 @@ def main():
     print()
     print("\U0001f4ca Validation metrics:")
     print(f"   \u2022 Mark pages as 'Done' after correcting — triggers CER/WER calculation")
+    print(f"   \u2022 Mark pages as 'Redo' to flag them for reprocessing")
     print(f"   \u2022 Metrics are saved per-page and as aggregates in the exported JSON")
-    print(f"   \u2022 Keyboard shortcut: D to toggle done status")
+    print(f"   \u2022 Keyboard shortcuts: D to toggle done, Shift+D to toggle redo")
     print()
     print("   To generate for another book, change BOOK_ROOT_DIR and re-run!")
 
