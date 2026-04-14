@@ -33,6 +33,12 @@ VALIDATION:
     - Automatic CER (Character Error Rate) and WER (Word Error Rate)
       calculation between original and corrected text
     - Metrics are displayed inline and saved to the exported JSON
+
+IMAGE ROTATION:
+    - Rotate the page image 90° CW/CCW or 180° using the controls
+      in the image panel header
+    - PageXML region overlays are re-projected to match the rotated view
+    - Rotation is saved per-page in the exported JSON
 ============================================================
 """
 
@@ -46,8 +52,9 @@ from xml.etree import ElementTree as ET
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION — Change these for each book
 # ═══════════════════════════════════════════════════════════
-BOOK_ROOT_DIR = "/content/drive/MyDrive/HistOrniGraph_output/Laubmann_01_gemini"
-
+BOOK_ROOT_DIR = globals().get('BOOK_ROOT_DIR_OVERRIDE', 
+    "/content/drive/MyDrive/HistOrniGraph_output/Laubmann_01_gemini")
+    
 # Subdirectory names (change only if your structure differs)
 MD_SUBDIR = "md"
 PAGES_SUBDIR = "pages"
@@ -89,11 +96,6 @@ def get_drive_service():
 
 
 def find_drive_folder_id(drive_path_from_mydrive):
-    """
-    Given a path relative to 'My Drive', navigate the folder
-    hierarchy via the Drive API and return the folder's file ID.
-    e.g. "HistOrniGraph_output/Laubmann_01_gemini/pages"
-    """
     service = get_drive_service()
     if not service:
         return None
@@ -120,7 +122,6 @@ def find_drive_folder_id(drive_path_from_mydrive):
 
 
 def list_files_in_folder(folder_id):
-    """List all files in a Drive folder, returning {filename: file_id}."""
     service = get_drive_service()
     if not service:
         return {}
@@ -147,7 +148,6 @@ def list_files_in_folder(folder_id):
 
 
 def share_folder_anyone_with_link(folder_id):
-    """Share a Drive folder so anyone with the link can view."""
     service = get_drive_service()
     if not service:
         return False
@@ -165,11 +165,6 @@ def share_folder_anyone_with_link(folder_id):
 
 
 def get_drive_relative_path(local_path):
-    """
-    Convert a local mounted path like
-    /content/drive/MyDrive/Foo/Bar
-    to a Drive-relative path like Foo/Bar
-    """
     markers = ["/content/drive/MyDrive/", "/content/drive/My Drive/"]
     for marker in markers:
         if local_path.startswith(marker):
@@ -178,15 +173,10 @@ def get_drive_relative_path(local_path):
 
 
 def build_image_url(file_id):
-    """Build a direct-view image URL from a Drive file ID."""
     return f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
 
 
 def resolve_image_urls(root_dir):
-    """
-    Resolve Google Drive URLs for all images in the pages folder.
-    Returns {filename: url} dict.
-    """
     pages_local = os.path.join(root_dir, PAGES_SUBDIR)
     drive_rel = get_drive_relative_path(pages_local)
 
@@ -201,13 +191,11 @@ def resolve_image_urls(root_dir):
 
     print(f"   ✓ Found pages folder ID: {folder_id}")
 
-    # Optionally share the folder
     if AUTO_SHARE_PAGES_FOLDER:
         print("   Sharing pages folder (anyone with link → viewer)...")
         if share_folder_anyone_with_link(folder_id):
             print("   ✓ Folder shared successfully")
 
-    # List all files and build URL map
     print("   Listing image files...")
     file_map = list_files_in_folder(folder_id)
     print(f"   ✓ Found {len(file_map)} files in pages folder")
@@ -353,12 +341,11 @@ def build_data(root_dir, image_urls):
         md_content = read_markdown(p["md_path"])
         pagexml_data = parse_pagexml(p["pagexml_path"])
 
-        # Resolve image URL: prefer Drive URL, fall back to relative path
         img_url = None
         if p["image_filename"]:
             img_url = image_urls.get(
                 p["image_filename"],
-                f'{PAGES_SUBDIR}/{p["image_filename"]}'  # fallback
+                f'{PAGES_SUBDIR}/{p["image_filename"]}'
             )
 
         data["pages"].append({
@@ -696,6 +683,8 @@ def generate_html(data):
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   .panel-header-right {
@@ -713,6 +702,42 @@ def generate_html(data):
   }
 
   .divider:hover, .divider.dragging { background: var(--accent); }
+
+  /* ── ROTATION CONTROLS ── */
+  .rotation-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .rot-btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    padding: 0;
+    line-height: 1;
+  }
+
+  .rot-btn:hover { border-color: var(--accent); color: var(--text-primary); background: var(--accent-subtle); }
+  .rot-btn.active { background: var(--accent-subtle); border-color: var(--accent); color: var(--accent); }
+
+  .rot-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    color: var(--text-muted);
+    min-width: 28px;
+    text-align: center;
+  }
 
   /* ── IMAGE PANEL ── */
   .image-viewport {
@@ -856,7 +881,7 @@ def generate_html(data):
   .editor-textarea::selection { background: rgba(139, 105, 20, 0.15); }
   .editor-textarea::placeholder { color: var(--text-muted); }
 
-  /* ── MARKDOWN PREVIEW (enhanced) ── */
+  /* ── MARKDOWN PREVIEW ── */
   .markdown-preview {
     width: 100%;
     height: 100%;
@@ -867,105 +892,23 @@ def generate_html(data):
     line-height: 1.8;
   }
 
-  .markdown-preview h1 {
-    font-size: 1.65em;
-    margin: 0.8em 0 0.4em;
-    font-weight: 600;
-    color: var(--text-primary);
-    border-bottom: 2px solid var(--bg-tertiary);
-    padding-bottom: 0.25em;
-  }
-
-  .markdown-preview h2 {
-    font-size: 1.35em;
-    margin: 0.7em 0 0.35em;
-    font-weight: 600;
-    color: var(--text-primary);
-    border-bottom: 1px solid var(--bg-tertiary);
-    padding-bottom: 0.2em;
-  }
-
-  .markdown-preview h3 {
-    font-size: 1.12em;
-    margin: 0.6em 0 0.25em;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-
-  .markdown-preview p {
-    margin: 0.55em 0;
-    line-height: 1.85;
-    color: var(--text-primary);
-    text-align: justify;
-    hyphens: auto;
-  }
-
-  .markdown-preview ul, .markdown-preview ol {
-    margin: 0.5em 0 0.5em 1.6em;
-  }
-
-  .markdown-preview li {
-    margin: 0.3em 0;
-    line-height: 1.7;
-  }
-
+  .markdown-preview h1 { font-size: 1.65em; margin: 0.8em 0 0.4em; font-weight: 600; color: var(--text-primary); border-bottom: 2px solid var(--bg-tertiary); padding-bottom: 0.25em; }
+  .markdown-preview h2 { font-size: 1.35em; margin: 0.7em 0 0.35em; font-weight: 600; color: var(--text-primary); border-bottom: 1px solid var(--bg-tertiary); padding-bottom: 0.2em; }
+  .markdown-preview h3 { font-size: 1.12em; margin: 0.6em 0 0.25em; font-weight: 600; color: var(--text-secondary); }
+  .markdown-preview p { margin: 0.55em 0; line-height: 1.85; color: var(--text-primary); text-align: justify; hyphens: auto; }
+  .markdown-preview ul, .markdown-preview ol { margin: 0.5em 0 0.5em 1.6em; }
+  .markdown-preview li { margin: 0.3em 0; line-height: 1.7; }
   .markdown-preview em { font-style: italic; }
   .markdown-preview strong { font-weight: 600; color: var(--text-primary); }
-
-  .markdown-preview code {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.85em;
-    background: var(--bg-secondary);
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid var(--border);
-    color: var(--accent);
-  }
-
-  .markdown-preview blockquote {
-    border-left: 3px solid var(--accent);
-    padding: 8px 16px;
-    color: var(--text-secondary);
-    margin: 0.6em 0;
-    font-style: italic;
-    background: var(--accent-subtle);
-    border-radius: 0 6px 6px 0;
-  }
-
-  .markdown-preview table {
-    border-collapse: collapse;
-    margin: 0.6em 0;
-    width: 100%;
-    font-size: 0.92em;
-  }
-
-  .markdown-preview th, .markdown-preview td {
-    border: 1px solid var(--border);
-    padding: 8px 12px;
-    text-align: left;
-  }
-
-  .markdown-preview th {
-    background: var(--bg-secondary);
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
+  .markdown-preview code { font-family: 'IBM Plex Mono', monospace; font-size: 0.85em; background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--accent); }
+  .markdown-preview blockquote { border-left: 3px solid var(--accent); padding: 8px 16px; color: var(--text-secondary); margin: 0.6em 0; font-style: italic; background: var(--accent-subtle); border-radius: 0 6px 6px 0; }
+  .markdown-preview table { border-collapse: collapse; margin: 0.6em 0; width: 100%; font-size: 0.92em; }
+  .markdown-preview th, .markdown-preview td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  .markdown-preview th { background: var(--bg-secondary); font-weight: 600; color: var(--text-primary); }
   .markdown-preview td { background: var(--bg-panel); }
   .markdown-preview tr:hover td { background: var(--accent-subtle); }
-
-  .markdown-preview hr {
-    border: none;
-    height: 1px;
-    background: var(--border);
-    margin: 1.2em 0;
-  }
-
-  .markdown-preview a {
-    color: var(--accent);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
+  .markdown-preview hr { border: none; height: 1px; background: var(--border); margin: 1.2em 0; }
+  .markdown-preview a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 
   /* ── DONE BUTTON & METRICS ── */
   .done-btn {
@@ -984,23 +927,9 @@ def generate_html(data):
     gap: 5px;
   }
 
-  .done-btn:hover {
-    border-color: var(--success);
-    color: var(--success);
-    background: var(--success-subtle);
-  }
-
-  .done-btn.is-done {
-    border-color: var(--success);
-    background: var(--success);
-    color: #fff;
-    font-weight: 500;
-  }
-
-  .done-btn.is-done:hover {
-    background: #2e6636;
-    border-color: #2e6636;
-  }
+  .done-btn:hover { border-color: var(--success); color: var(--success); background: var(--success-subtle); }
+  .done-btn.is-done { border-color: var(--success); background: var(--success); color: #fff; font-weight: 500; }
+  .done-btn.is-done:hover { background: #2e6636; border-color: #2e6636; }
 
   /* ── REDO BUTTON ── */
   .redo-btn {
@@ -1019,23 +948,9 @@ def generate_html(data):
     gap: 5px;
   }
 
-  .redo-btn:hover {
-    border-color: var(--warning);
-    color: var(--warning);
-    background: var(--warning-subtle);
-  }
-
-  .redo-btn.is-redo {
-    border-color: var(--warning);
-    background: var(--warning);
-    color: #fff;
-    font-weight: 500;
-  }
-
-  .redo-btn.is-redo:hover {
-    background: #a36812;
-    border-color: #a36812;
-  }
+  .redo-btn:hover { border-color: var(--warning); color: var(--warning); background: var(--warning-subtle); }
+  .redo-btn.is-redo { border-color: var(--warning); background: var(--warning); color: #fff; font-weight: 500; }
+  .redo-btn.is-redo:hover { background: #a36812; border-color: #a36812; }
 
   .metrics-bar {
     flex-shrink: 0;
@@ -1053,53 +968,21 @@ def generate_html(data):
     transition: height 0.25s ease;
   }
 
-  .metrics-bar.visible {
-    height: 38px;
-  }
+  .metrics-bar.visible { height: 38px; }
 
-  .metric-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .metric-label {
-    color: var(--text-muted);
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .metric-value {
-    font-weight: 600;
-    font-size: 12px;
-  }
-
+  .metric-item { display: flex; align-items: center; gap: 6px; }
+  .metric-label { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .metric-value { font-weight: 600; font-size: 12px; }
   .metric-value.excellent { color: var(--success); }
   .metric-value.good { color: #5a9e3a; }
   .metric-value.moderate { color: var(--warning); }
   .metric-value.poor { color: var(--danger); }
-
-  .metric-sep {
-    width: 1px;
-    height: 18px;
-    background: rgba(58, 125, 68, 0.2);
-  }
-
-  .metrics-bar .done-timestamp {
-    margin-left: auto;
-    font-size: 10px;
-    color: var(--text-muted);
-  }
+  .metric-sep { width: 1px; height: 18px; background: rgba(58, 125, 68, 0.2); }
+  .metrics-bar .done-timestamp { margin-left: auto; font-size: 10px; color: var(--text-muted); }
 
   /* ── PAGE SELECT done/redo indicators ── */
-  .page-select option.opt-done {
-    color: var(--success);
-  }
-
-  .page-select option.opt-redo {
-    color: var(--warning);
-  }
+  .page-select option.opt-done { color: var(--success); }
+  .page-select option.opt-redo { color: var(--warning); }
 
   /* ── STATUS BAR ── */
   .statusbar {
@@ -1116,105 +999,29 @@ def generate_html(data):
     flex-shrink: 0;
   }
 
-  .status-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 4px;
-  }
-
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 4px; }
   .status-dot.clean { background: var(--success); }
   .status-dot.dirty { background: var(--warning); }
 
-  .legend {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-  }
+  .legend { display: flex; gap: 12px; align-items: center; }
+  .legend-item { display: flex; align-items: center; gap: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--text-muted); }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); }
 
-  .legend-item {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 10px;
-    color: var(--text-muted);
-  }
+  .no-image { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-family: 'IBM Plex Mono', monospace; font-size: 13px; flex-direction: column; gap: 8px; }
+  .no-image .hint { font-size: 11px; max-width: 380px; text-align: center; line-height: 1.5; }
 
-  .legend-swatch {
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-    border: 1px solid rgba(0,0,0,0.15);
-  }
-
-  .no-image {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--text-muted);
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 13px;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .no-image .hint {
-    font-size: 11px;
-    max-width: 380px;
-    text-align: center;
-    line-height: 1.5;
-  }
-
-  kbd {
-    display: inline-block;
-    padding: 1px 5px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 10px;
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--text-muted);
-    box-shadow: 0 1px 0 var(--border);
-  }
+  kbd { display: inline-block; padding: 1px 5px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 3px; color: var(--text-muted); box-shadow: 0 1px 0 var(--border); }
 
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-  .image-loading-overlay {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    display: none;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    z-index: 5;
-  }
-
+  .image-loading-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: none; flex-direction: column; align-items: center; gap: 10px; z-index: 5; }
   .image-loading-overlay.active { display: flex; }
-
-  .spinner {
-    width: 32px;
-    height: 32px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-
+  .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-
-  .spinner-text {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    color: var(--text-muted);
-  }
+  .spinner-text { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-muted); }
 
   @media (max-width: 800px) {
     .main-container { flex-direction: column; }
@@ -1248,7 +1055,7 @@ def generate_html(data):
   </div>
 </div>
 
-<!-- Restore Banner (shown when a local auto-save is detected) -->
+<!-- Restore Banner -->
 <div class="restore-banner" id="restoreBanner" style="display:none">
   <span class="banner-icon">&#128190;</span>
   <span class="banner-text" id="bannerText"></span>
@@ -1264,6 +1071,13 @@ def generate_html(data):
   <div class="panel" id="imagePanel">
     <div class="panel-header">
       <span>Original Page</span>
+      <!-- Rotation controls -->
+      <div class="rotation-controls" title="Rotate image">
+        <button class="rot-btn" id="btnRotCCW" title="Rotate 90° counter-clockwise (&#91;)">&#8634;</button>
+        <span class="rot-label" id="rotLabel">0°</span>
+        <button class="rot-btn" id="btnRotCW" title="Rotate 90° clockwise (&#93;)">&#8635;</button>
+        <button class="rot-btn" id="btnRotReset" title="Reset rotation (Backslash)" style="font-size:10px;width:32px;">0°&#8617;</button>
+      </div>
       <div class="legend" id="regionLegend" style="display:none">
         <div class="legend-item"><div class="legend-swatch" style="background:var(--region-text)"></div>Text</div>
         <div class="legend-item"><div class="legend-swatch" style="background:var(--region-image)"></div>Image</div>
@@ -1327,6 +1141,11 @@ def generate_html(data):
         <span class="metric-label">Edits</span>
         <span class="metric-value" id="metricEdits" style="color:var(--text-primary)">—</span>
       </div>
+      <div class="metric-sep"></div>
+      <div class="metric-item">
+        <span class="metric-label">Rotation</span>
+        <span class="metric-value" id="metricRotation" style="color:var(--text-primary)">—</span>
+      </div>
       <span class="done-timestamp" id="doneTimestamp"></span>
     </div>
     <div class="editor-wrapper">
@@ -1353,6 +1172,7 @@ def generate_html(data):
     <kbd>Shift+D</kbd> redo &nbsp;
     <kbd>R</kbd> regions &nbsp;
     <kbd>F</kbd> fit &nbsp;
+    <kbd>[</kbd><kbd>]</kbd> rotate &nbsp;
     <kbd>+</kbd><kbd>-</kbd> zoom
   </span>
 </div>
@@ -1360,16 +1180,18 @@ def generate_html(data):
 <script>
 const DATA = """ + data_json + r""";
 
-// ── Storage key is book-specific so multiple books don't interfere ──
 const STORAGE_KEY = 'histornigraph_session_' + DATA.bookName;
 
 let currentPageIdx = 0;
 let showRegions = false;
 let zoom = 1, panX = 0, panY = 0;
 let isPanning = false, panStartX = 0, panStartY = 0;
-let edits = {};      // { stem: editedText }  — only stores pages that differ from original
-let donePages = {};  // { stem: { cer, wer, charEdits, wordEdits, doneAt } }
-let redoPages = {};  // { stem: { markedAt } }  — pages flagged for reprocessing
+let edits = {};
+let donePages = {};
+let redoPages = {};
+// Per-page rotation store: { stem: 0|90|180|270 }
+let pageRotations = {};
+let imageRotation = 0; // current page's rotation in degrees (0,90,180,270)
 let activeTab = 'edit';
 let pageLoaded = false;
 let autoSaveTimer = null;
@@ -1388,6 +1210,10 @@ const btnExport = $('btnExport');
 const btnImport = $('btnImport');
 const btnDone = $('btnDone');
 const btnRedo = $('btnRedo');
+const btnRotCW = $('btnRotCW');
+const btnRotCCW = $('btnRotCCW');
+const btnRotReset = $('btnRotReset');
+const rotLabel = $('rotLabel');
 const sessionFileInput = $('sessionFileInput');
 const restoreBanner = $('restoreBanner');
 const bannerText = $('bannerText');
@@ -1412,6 +1238,7 @@ const metricsBar = $('metricsBar');
 const metricCER = $('metricCER');
 const metricWER = $('metricWER');
 const metricEdits = $('metricEdits');
+const metricRotation = $('metricRotation');
 const doneTimestamp = $('doneTimestamp');
 const doneIcon = $('doneIcon');
 const doneLabel = $('doneLabel');
@@ -1434,44 +1261,83 @@ function showToast(msg, duration) {
 }
 
 // ══════════════════════════════════════════════════════════
-// CER / WER CALCULATION
+// IMAGE ROTATION
 // ══════════════════════════════════════════════════════════
 
 /**
- * Compute Levenshtein edit distance between two arrays (of chars or words).
- * Uses O(min(m,n)) space via single-row approach.
+ * Rotate a single point (px, py) around the center of image
+ * (origW × origH) by `degrees` clockwise.
+ * Returns the new [x, y] in the rotated coordinate space.
+ *
+ * For each rotation step the canvas swaps w/h:
+ *   0°  → canvas is origW × origH,  point unchanged
+ *   90° → canvas is origH × origW,  (x,y) → (origH-y, x)
+ *  180° → canvas is origW × origH,  (x,y) → (origW-x, origH-y)
+ *  270° → canvas is origH × origW,  (x,y) → (y, origW-x)
  */
+function rotatePoint(px, py, origW, origH, degrees) {
+  var d = ((degrees % 360) + 360) % 360;
+  if (d === 0)   return [px, py];
+  if (d === 90)  return [origH - py, px];
+  if (d === 180) return [origW - px, origH - py];
+  if (d === 270) return [py, origW - px];
+  return [px, py];
+}
+
+/**
+ * Return the canvas dimensions after rotating origW × origH by degrees.
+ */
+function rotatedDimensions(origW, origH, degrees) {
+  var d = ((degrees % 360) + 360) % 360;
+  if (d === 90 || d === 270) return [origH, origW];
+  return [origW, origH];
+}
+
+function setRotation(deg) {
+  imageRotation = ((deg % 360) + 360) % 360;
+  var page = DATA.pages[currentPageIdx];
+  if (imageRotation === 0) {
+    delete pageRotations[page.stem];
+  } else {
+    pageRotations[page.stem] = imageRotation;
+  }
+  rotLabel.textContent = imageRotation + '°';
+
+  // Highlight active rotation button
+  btnRotCW.classList.toggle('active', imageRotation !== 0);
+  btnRotCCW.classList.toggle('active', imageRotation !== 0);
+
+  updateTransform();
+  drawRegions();
+  scheduleAutoSave();
+}
+
+function rotateCW()  { setRotation(imageRotation + 90);  fitToWidth(); }
+function rotateCCW() { setRotation(imageRotation - 90);  fitToWidth(); }
+function rotateReset(){ setRotation(0); fitToWidth(); }
+
+// ══════════════════════════════════════════════════════════
+// CER / WER CALCULATION
+// ══════════════════════════════════════════════════════════
+
 function levenshteinDistance(a, b) {
   if (a.length === 0) return b.length;
   if (b.length === 0) return a.length;
-
-  // Ensure a is the shorter one for space efficiency
   if (a.length > b.length) { var tmp = a; a = b; b = tmp; }
-
   var prev = new Array(a.length + 1);
   var curr = new Array(a.length + 1);
   for (var i = 0; i <= a.length; i++) prev[i] = i;
-
   for (var j = 1; j <= b.length; j++) {
     curr[0] = j;
     for (var i = 1; i <= a.length; i++) {
-      if (a[i - 1] === b[j - 1]) {
-        curr[i] = prev[i - 1];
-      } else {
-        curr[i] = 1 + Math.min(prev[i - 1], prev[i], curr[i - 1]);
-      }
+      if (a[i - 1] === b[j - 1]) { curr[i] = prev[i - 1]; }
+      else { curr[i] = 1 + Math.min(prev[i - 1], prev[i], curr[i - 1]); }
     }
     var swap = prev; prev = curr; curr = swap;
   }
   return prev[a.length];
 }
 
-/**
- * CER: Character Error Rate = char-level Levenshtein / max(len(reference), 1)
- * reference = original (automatic transcription)
- * hypothesis = edited (corrected by user)
- * Returns { cer, distance, refLen }
- */
 function computeCER(reference, hypothesis) {
   var refChars = Array.from(reference);
   var hypChars = Array.from(hypothesis);
@@ -1480,11 +1346,6 @@ function computeCER(reference, hypothesis) {
   return { cer: dist / refLen, distance: dist, refLen: refChars.length };
 }
 
-/**
- * WER: Word Error Rate = word-level Levenshtein / max(numWords(reference), 1)
- * Splits on whitespace, filters empty tokens.
- * Returns { wer, distance, refLen }
- */
 function computeWER(reference, hypothesis) {
   var refWords = reference.split(/\s+/).filter(function(w) { return w.length > 0; });
   var hypWords = hypothesis.split(/\s+/).filter(function(w) { return w.length > 0; });
@@ -1493,9 +1354,6 @@ function computeWER(reference, hypothesis) {
   return { wer: dist / refLen, distance: dist, refLen: refWords.length };
 }
 
-/**
- * Classify an error rate into a quality tier for styling.
- */
 function rateTier(rate) {
   if (rate <= 0.02) return 'excellent';
   if (rate <= 0.08) return 'good';
@@ -1503,9 +1361,7 @@ function rateTier(rate) {
   return 'poor';
 }
 
-function formatRate(rate) {
-  return (rate * 100).toFixed(2) + '%';
-}
+function formatRate(rate) { return (rate * 100).toFixed(2) + '%'; }
 
 // ══════════════════════════════════════════════════════════
 // MARK AS DONE
@@ -1517,14 +1373,11 @@ function togglePageDone() {
   var stem = page.stem;
 
   if (donePages[stem]) {
-    // Un-mark: remove done status
     delete donePages[stem];
     showToast('Page ' + (currentPageIdx + 1) + ' unmarked');
   } else {
-    // Mark done: compute metrics
     var original = page.markdown;
     var corrected = editorTextarea.value;
-
     var cerResult = computeCER(original, corrected);
     var werResult = computeWER(original, corrected);
 
@@ -1535,6 +1388,7 @@ function togglePageDone() {
       wordEdits: werResult.distance,
       refChars: cerResult.refLen,
       refWords: werResult.refLen,
+      imageRotation: imageRotation,  // ← save rotation at time of marking done
       doneAt: new Date().toISOString()
     };
 
@@ -1562,6 +1416,7 @@ function updateDoneDisplay() {
     metricWER.textContent = formatRate(info.wer);
     metricWER.className = 'metric-value ' + rateTier(info.wer);
     metricEdits.textContent = info.charEdits + ' chars / ' + info.wordEdits + ' words';
+    metricRotation.textContent = (info.imageRotation !== undefined ? info.imageRotation : 0) + '°';
 
     try {
       var d = new Date(info.doneAt);
@@ -1574,14 +1429,11 @@ function updateDoneDisplay() {
     btnDone.classList.remove('is-done');
     doneIcon.innerHTML = '&#9744;';
     doneLabel.textContent = 'Mark done';
-
-    metricCER.textContent = '\u2014';
-    metricCER.className = 'metric-value';
-    metricWER.textContent = '\u2014';
-    metricWER.className = 'metric-value';
+    metricCER.textContent = '\u2014'; metricCER.className = 'metric-value';
+    metricWER.textContent = '\u2014'; metricWER.className = 'metric-value';
     metricEdits.textContent = '\u2014';
+    metricRotation.textContent = '\u2014';
     doneTimestamp.textContent = '';
-
     metricsBar.classList.remove('visible');
   }
 }
@@ -1594,17 +1446,13 @@ function togglePageRedo() {
   saveCurrentEdits();
   var page = DATA.pages[currentPageIdx];
   var stem = page.stem;
-
   if (redoPages[stem]) {
     delete redoPages[stem];
     showToast('Page ' + (currentPageIdx + 1) + ' redo flag removed');
   } else {
-    redoPages[stem] = {
-      markedAt: new Date().toISOString()
-    };
+    redoPages[stem] = { markedAt: new Date().toISOString() };
     showToast('Page ' + (currentPageIdx + 1) + ' flagged for redo');
   }
-
   updateRedoDisplay();
   updateProgress();
   updatePageSelectLabels();
@@ -1614,7 +1462,6 @@ function togglePageRedo() {
 function updateRedoDisplay() {
   var page = DATA.pages[currentPageIdx];
   var isRedo = !!redoPages[page.stem];
-
   if (isRedo) {
     btnRedo.classList.add('is-redo');
     redoIcon.innerHTML = '&#9745;';
@@ -1654,13 +1501,9 @@ function updatePageSelectLabels() {
 }
 
 // ══════════════════════════════════════════════════════════
-// SESSION PERSISTENCE — localStorage auto-save
+// SESSION PERSISTENCE
 // ══════════════════════════════════════════════════════════
 
-/**
- * Build a compact session object.
- * Only stores pages that were actually edited to keep size small.
- */
 function buildSessionObject(pageIdx) {
   var session = {
     _session: {
@@ -1669,29 +1512,20 @@ function buildSessionObject(pageIdx) {
       savedAt: new Date().toISOString(),
       editCount: Object.keys(edits).length,
       doneCount: Object.keys(donePages).length,
-      redoCount: Object.keys(redoPages).length
+      redoCount: Object.keys(redoPages).length,
+      rotationCount: Object.keys(pageRotations).length
     },
     _donePages: {},
-    _redoPages: {}
+    _redoPages: {},
+    _pageRotations: {}
   };
-  // Copy only modified pages
-  Object.keys(edits).forEach(function(stem) {
-    session[stem] = edits[stem];
-  });
-  // Copy done pages with their metrics
-  Object.keys(donePages).forEach(function(stem) {
-    session._donePages[stem] = donePages[stem];
-  });
-  // Copy redo pages
-  Object.keys(redoPages).forEach(function(stem) {
-    session._redoPages[stem] = redoPages[stem];
-  });
+  Object.keys(edits).forEach(function(stem) { session[stem] = edits[stem]; });
+  Object.keys(donePages).forEach(function(stem) { session._donePages[stem] = donePages[stem]; });
+  Object.keys(redoPages).forEach(function(stem) { session._redoPages[stem] = redoPages[stem]; });
+  Object.keys(pageRotations).forEach(function(stem) { session._pageRotations[stem] = pageRotations[stem]; });
   return session;
 }
 
-/**
- * Write current session to localStorage (silent — no user feedback).
- */
 function autoSaveToLocalStorage() {
   try {
     var session = buildSessionObject();
@@ -1701,15 +1535,9 @@ function autoSaveToLocalStorage() {
     var mm = String(now.getMinutes()).padStart(2, '0');
     var ss = String(now.getSeconds()).padStart(2, '0');
     autoSaveStatus.textContent = 'Auto-saved ' + hh + ':' + mm + ':' + ss;
-  } catch(e) {
-    // localStorage might be unavailable (private browsing, quota exceeded, etc.)
-    autoSaveStatus.textContent = '';
-  }
+  } catch(e) { autoSaveStatus.textContent = ''; }
 }
 
-/**
- * Schedule a debounced auto-save (fires 1.5 s after the last edit).
- */
 function scheduleAutoSave() {
   clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(function() {
@@ -1718,67 +1546,52 @@ function scheduleAutoSave() {
   }, 1500);
 }
 
-/**
- * Load a raw session object (from localStorage or imported JSON) into
- * the editor: restore edits dict and jump to lastPage.
- */
 function applySession(session, source) {
   source = source || 'session';
   var meta = session._session || {};
-  var restoredEdits = 0;
-  var restoredDone = 0;
-  var restoredRedo = 0;
+  var restoredEdits = 0, restoredDone = 0, restoredRedo = 0, restoredRot = 0;
 
-  // Rebuild edits dict from the session
   Object.keys(session).forEach(function(key) {
-    if (key === '_session' || key === '_donePages' || key === '_redoPages') return;
-    // Value is either a plain string (new format) or {edited, ...} object (export format)
+    if (key === '_session' || key === '_donePages' || key === '_redoPages' || key === '_pageRotations') return;
     var val = session[key];
     if (typeof val === 'string') {
-      edits[key] = val;
-      restoredEdits++;
+      edits[key] = val; restoredEdits++;
     } else if (val && typeof val.edited === 'string') {
-      // Accept the full export format {original, edited, modified}
-      if (val.modified) {
-        edits[key] = val.edited;
-        restoredEdits++;
-      }
+      if (val.modified) { edits[key] = val.edited; restoredEdits++; }
     }
   });
 
-  // Rebuild donePages from session
   if (session._donePages) {
     Object.keys(session._donePages).forEach(function(stem) {
-      donePages[stem] = session._donePages[stem];
-      restoredDone++;
+      donePages[stem] = session._donePages[stem]; restoredDone++;
     });
   }
-
-  // Rebuild redoPages from session
   if (session._redoPages) {
     Object.keys(session._redoPages).forEach(function(stem) {
-      redoPages[stem] = session._redoPages[stem];
-      restoredRedo++;
+      redoPages[stem] = session._redoPages[stem]; restoredRedo++;
+    });
+  }
+  if (session._pageRotations) {
+    Object.keys(session._pageRotations).forEach(function(stem) {
+      pageRotations[stem] = session._pageRotations[stem]; restoredRot++;
     });
   }
 
   var targetPage = (meta.lastPage !== undefined) ? parseInt(meta.lastPage) : 0;
   targetPage = Math.max(0, Math.min(targetPage, DATA.pages.length - 1));
 
-  // Reload the current page display with restored edits
-  pageLoaded = false; // suppress saveCurrentEdits from overwriting
+  pageLoaded = false;
   loadPage(targetPage);
   updateProgress();
   updatePageSelectLabels();
 
-  var msg = '\u2713 Session restored \u2014 ' + restoredEdits + ' edit(s), ' + restoredDone + ' done, ' + restoredRedo + ' redo, page ' + (targetPage + 1);
+  var msg = '\u2713 Session restored \u2014 ' + restoredEdits + ' edit(s), ' + restoredDone + ' done, ' + restoredRedo + ' redo';
+  if (restoredRot > 0) msg += ', ' + restoredRot + ' rotation(s)';
+  msg += ', page ' + (targetPage + 1);
   showToast(msg, 3500);
-  autoSaveToLocalStorage(); // persist merged state immediately
+  autoSaveToLocalStorage();
 }
 
-/**
- * Check localStorage on startup and show the restore banner if data found.
- */
 function checkLocalStorageSession() {
   try {
     var raw = localStorage.getItem(STORAGE_KEY);
@@ -1786,10 +1599,12 @@ function checkLocalStorageSession() {
     var session = JSON.parse(raw);
     var meta = session._session;
     if (!meta || meta.bookName !== DATA.bookName) return;
-    if (Object.keys(session).filter(function(k) { return k !== '_session' && k !== '_donePages' && k !== '_redoPages'; }).length === 0 &&
-        meta.editCount === 0 && (!meta.doneCount || meta.doneCount === 0) && (!meta.redoCount || meta.redoCount === 0)) return; // nothing to restore
+    var hasData = Object.keys(session).filter(function(k) {
+      return k !== '_session' && k !== '_donePages' && k !== '_redoPages' && k !== '_pageRotations';
+    }).length > 0;
+    if (!hasData && meta.editCount === 0 && (!meta.doneCount || meta.doneCount === 0) &&
+        (!meta.redoCount || meta.redoCount === 0) && (!meta.rotationCount || meta.rotationCount === 0)) return;
 
-    // Format the saved timestamp nicely
     var savedAt = '';
     try {
       var d = new Date(meta.savedAt);
@@ -1800,18 +1615,18 @@ function checkLocalStorageSession() {
     var editCount = meta.editCount || 0;
     var doneCount = meta.doneCount || 0;
     var redoCount = meta.redoCount || 0;
+    var rotCount = meta.rotationCount || 0;
     var lastPageNum = (meta.lastPage !== undefined) ? meta.lastPage + 1 : '?';
     var details = editCount + ' edited, ' + doneCount + ' done';
     if (redoCount > 0) details += ', ' + redoCount + ' redo';
+    if (rotCount > 0) details += ', ' + rotCount + ' rotated';
     bannerText.innerHTML =
       'Auto-save found from <strong>' + savedAt + '</strong> \u2014 ' +
       details + ', last on page <strong>' + lastPageNum + '</strong>.';
 
-    // Store for restore button
     restoreBanner._sessionData = session;
     restoreBanner.style.display = 'flex';
   } catch(e) {
-    // Corrupted data — ignore silently
     try { localStorage.removeItem(STORAGE_KEY); } catch(e2) {}
   }
 }
@@ -1851,6 +1666,12 @@ function loadPage(idx) {
   btnPrev.disabled = idx === 0;
   btnNext.disabled = idx === DATA.pages.length - 1;
 
+  // Restore per-page rotation
+  imageRotation = pageRotations[page.stem] || 0;
+  rotLabel.textContent = imageRotation + '°';
+  btnRotCW.classList.toggle('active', imageRotation !== 0);
+  btnRotCCW.classList.toggle('active', imageRotation !== 0);
+
   if (page.imagePath) {
     noImage.style.display = 'none';
     imageContainer.style.display = 'block';
@@ -1875,7 +1696,6 @@ function loadPage(idx) {
         hint.textContent = 'Image path: ' + page.imagePath;
       }
     };
-
     pageImage.src = page.imagePath;
   } else {
     noImage.style.display = 'flex';
@@ -1893,7 +1713,6 @@ function loadPage(idx) {
   updateRedoDisplay();
   pageLoaded = true;
 
-  // Auto-save position change (debounced so rapid nav doesn't hammer storage)
   scheduleAutoSave();
 }
 
@@ -1917,23 +1736,36 @@ function drawRegions() {
   var pxml = page.pagexml;
   if (!pxml || pxml.regions.length === 0) { regionOverlay.innerHTML = ''; return; }
 
-  var w = pxml.width || pageImage.naturalWidth;
-  var h = pxml.height || pageImage.naturalHeight;
-  regionOverlay.setAttribute('width', w);
-  regionOverlay.setAttribute('height', h);
-  regionOverlay.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-  regionOverlay.style.width = w + 'px';
-  regionOverlay.style.height = h + 'px';
+  // Original image dimensions from PageXML (fall back to natural img size)
+  var origW = pxml.width || pageImage.naturalWidth;
+  var origH = pxml.height || pageImage.naturalHeight;
+
+  // Canvas dimensions after rotation
+  var dims = rotatedDimensions(origW, origH, imageRotation);
+  var canvasW = dims[0];
+  var canvasH = dims[1];
+
+  regionOverlay.setAttribute('width', canvasW);
+  regionOverlay.setAttribute('height', canvasH);
+  regionOverlay.setAttribute('viewBox', '0 0 ' + canvasW + ' ' + canvasH);
+  regionOverlay.style.width = canvasW + 'px';
+  regionOverlay.style.height = canvasH + 'px';
 
   var svg = '';
   pxml.regions.forEach(function(r) {
     var color = getRegionColor(r.type, r.custom);
-    var pts = r.points.map(function(p) { return p.join(','); }).join(' ');
-    var minX = Math.min.apply(null, r.points.map(function(p) { return p[0]; }));
-    var minY = Math.min.apply(null, r.points.map(function(p) { return p[1]; }));
+
+    // Rotate all polygon points
+    var rotatedPts = r.points.map(function(p) {
+      return rotatePoint(p[0], p[1], origW, origH, imageRotation);
+    });
+
+    var pts = rotatedPts.map(function(p) { return p.join(','); }).join(' ');
+    var minX = Math.min.apply(null, rotatedPts.map(function(p) { return p[0]; }));
+    var minY = Math.min.apply(null, rotatedPts.map(function(p) { return p[1]; }));
     var label = r.custom ? r.custom.replace(/^type:/, '') : r.type;
     svg += '<polygon class="region-polygon" points="' + pts + '" fill="' + color + '" stroke="' + color + '" />';
-    svg += '<text class="region-label" x="' + (minX + 4) + '" y="' + (minY - 4) + '">' + escHtml(label) + (r.id ? ' #' + escHtml(r.id) : '') + '</text>';
+    svg += '<text class="region-label" x="' + (minX + 4) + '" y="' + (minY + 14) + '">' + escHtml(label) + (r.id ? ' #' + escHtml(r.id) : '') + '</text>';
   });
   regionOverlay.innerHTML = svg;
 }
@@ -1950,10 +1782,43 @@ function getRegionColor(type, custom) {
 function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // ══════════════════════════════════════════════════════════
-// ZOOM / PAN
+// ZOOM / PAN  (rotation is a CSS transform on the img+svg wrapper)
 // ══════════════════════════════════════════════════════════
 
 function updateTransform() {
+  // The image itself is rotated via CSS on the img element.
+  // The imageContainer is then panned/zoomed as before.
+  // We apply rotation to the img and SVG overlay together via a wrapper transform.
+  pageImage.style.transform = 'rotate(' + imageRotation + 'deg)';
+  pageImage.style.transformOrigin = 'top left';
+
+  // For 90°/270° the image's bounding box in the DOM is still the original size
+  // but the visual rotates. To handle layout correctly we adjust the container
+  // size to match the rotated dimensions.
+  var origW = pageImage.naturalWidth  || 0;
+  var origH = pageImage.naturalHeight || 0;
+  var dims = rotatedDimensions(origW, origH, imageRotation);
+  var canvasW = dims[0];
+  var canvasH = dims[1];
+
+  // Offset the image so top-left of rotated image aligns with container origin
+  var offsetX = 0, offsetY = 0;
+  if (imageRotation === 90)  { offsetX = origH; offsetY = 0; }
+  if (imageRotation === 180) { offsetX = origW; offsetY = origH; }
+  if (imageRotation === 270) { offsetX = 0;     offsetY = origW; }
+
+  pageImage.style.marginLeft = offsetX + 'px';
+  pageImage.style.marginTop  = offsetY + 'px';
+
+  // Resize the container to the rotated canvas dimensions
+  imageContainer.style.width  = canvasW + 'px';
+  imageContainer.style.height = canvasH + 'px';
+
+  // Also position SVG overlay
+  regionOverlay.style.left = '0px';
+  regionOverlay.style.top  = '0px';
+
+  // Apply pan+zoom to the outer container
   imageContainer.style.transform = 'translate(' + panX + 'px, ' + panY + 'px) scale(' + zoom + ')';
   zoomLevel.textContent = Math.round(zoom * 100) + '%';
 }
@@ -1970,9 +1835,11 @@ function zoomTo(newZoom, cx, cy) {
 
 function fitToWidth() {
   var vw = imageViewport.clientWidth;
-  var iw = pageImage.naturalWidth;
-  if (!iw) return;
-  zoom = (vw - 20) / iw;
+  var origW = pageImage.naturalWidth  || 1;
+  var origH = pageImage.naturalHeight || 1;
+  var dims = rotatedDimensions(origW, origH, imageRotation);
+  var canvasW = dims[0];
+  zoom = (vw - 20) / canvasW;
   panX = 10; panY = 10;
   updateTransform();
 }
@@ -2030,7 +1897,7 @@ function updateDirtyState() {
 }
 
 // ══════════════════════════════════════════════════════════
-// EXPORT — enhanced to include session metadata + metrics + redo
+// EXPORT — includes per-page rotation
 // ══════════════════════════════════════════════════════════
 
 function exportEdits() {
@@ -2042,30 +1909,25 @@ function exportEdits() {
       exportedAt: new Date().toISOString(),
       editCount: Object.keys(edits).length,
       doneCount: Object.keys(donePages).length,
-      redoCount: Object.keys(redoPages).length
+      redoCount: Object.keys(redoPages).length,
+      rotationCount: Object.keys(pageRotations).length
     },
     _donePages: {},
-    _redoPages: {}
+    _redoPages: {},
+    _pageRotations: {}
   };
 
-  // Copy done pages with metrics
-  Object.keys(donePages).forEach(function(stem) {
-    output._donePages[stem] = donePages[stem];
-  });
+  Object.keys(donePages).forEach(function(stem) { output._donePages[stem] = donePages[stem]; });
+  Object.keys(redoPages).forEach(function(stem) { output._redoPages[stem] = redoPages[stem]; });
+  // Export all per-page rotations (non-zero only, already filtered at set time)
+  Object.keys(pageRotations).forEach(function(stem) { output._pageRotations[stem] = pageRotations[stem]; });
 
-  // Copy redo pages
-  Object.keys(redoPages).forEach(function(stem) {
-    output._redoPages[stem] = redoPages[stem];
-  });
-
-  // Compute aggregate metrics across all done pages
+  // Aggregate metrics
   var totalCerDist = 0, totalCerRef = 0, totalWerDist = 0, totalWerRef = 0;
   Object.keys(donePages).forEach(function(stem) {
     var m = donePages[stem];
-    totalCerDist += m.charEdits;
-    totalCerRef += m.refChars;
-    totalWerDist += m.wordEdits;
-    totalWerRef += m.refWords;
+    totalCerDist += m.charEdits; totalCerRef += m.refChars;
+    totalWerDist += m.wordEdits; totalWerRef += m.refWords;
   });
 
   if (Object.keys(donePages).length > 0) {
@@ -2073,6 +1935,7 @@ function exportEdits() {
       totalPages: DATA.pages.length,
       donePages: Object.keys(donePages).length,
       redoPages: Object.keys(redoPages).length,
+      rotatedPages: Object.keys(pageRotations).length,
       microCER: totalCerRef > 0 ? totalCerDist / totalCerRef : 0,
       microWER: totalWerRef > 0 ? totalWerDist / totalWerRef : 0,
       totalCharEdits: totalCerDist,
@@ -2082,34 +1945,23 @@ function exportEdits() {
     };
   }
 
-  var modCount = 0;
   DATA.pages.forEach(function(p) {
     var mod = edits[p.stem] !== undefined;
-    if (mod) {
-      modCount++;
+    var rot = pageRotations[p.stem] || 0;
+    var hasRedo = !!redoPages[p.stem];
+
+    if (mod || rot || hasRedo) {
       output[p.stem] = {
         original: p.markdown,
-        edited: edits[p.stem],
-        modified: true
+        edited: mod ? edits[p.stem] : p.markdown,
+        modified: mod,
+        imageRotation: rot  // ← always written (0 if untouched)
       };
-      // Attach per-page metrics if this page was marked done
-      if (donePages[p.stem]) {
-        output[p.stem].metrics = donePages[p.stem];
-      }
-      // Attach redo flag if set
-      if (redoPages[p.stem]) {
-        output[p.stem].redo = redoPages[p.stem];
-      }
-    } else if (redoPages[p.stem]) {
-      // Page not edited but flagged for redo — still include it
-      output[p.stem] = {
-        original: p.markdown,
-        edited: p.markdown,
-        modified: false,
-        redo: redoPages[p.stem]
-      };
+      if (donePages[p.stem]) { output[p.stem].metrics = donePages[p.stem]; }
+      if (hasRedo) { output[p.stem].redo = redoPages[p.stem]; }
     }
   });
+
   var blob = new Blob([JSON.stringify(output, null, 2)], { type: 'application/json' });
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
@@ -2117,13 +1969,15 @@ function exportEdits() {
   a.download = DATA.bookName + '_edits.json';
   a.click();
   URL.revokeObjectURL(url);
-  var parts = [modCount + ' modified', Object.keys(donePages).length + ' done'];
+
+  var parts = [Object.keys(edits).length + ' modified', Object.keys(donePages).length + ' done'];
   if (Object.keys(redoPages).length > 0) parts.push(Object.keys(redoPages).length + ' redo');
+  if (Object.keys(pageRotations).length > 0) parts.push(Object.keys(pageRotations).length + ' rotated');
   showToast('Exported ' + parts.join(', ') + ' page(s)');
 }
 
 // ══════════════════════════════════════════════════════════
-// IMPORT — load a previously exported JSON
+// IMPORT
 // ══════════════════════════════════════════════════════════
 
 function importSessionFromFile(file) {
@@ -2131,7 +1985,6 @@ function importSessionFromFile(file) {
   reader.onload = function(e) {
     try {
       var session = JSON.parse(e.target.result);
-      // Validate it's for this book
       if (session._session && session._session.bookName &&
           session._session.bookName !== DATA.bookName) {
         showToast('\u26a0 This session is for "' + session._session.bookName +
@@ -2139,27 +1992,29 @@ function importSessionFromFile(file) {
         return;
       }
 
-      // If import format has metrics embedded in page entries, extract them
       if (!session._donePages) {
         session._donePages = {};
         Object.keys(session).forEach(function(key) {
-          if (key === '_session' || key === '_donePages' || key === '_redoPages') return;
+          if (key === '_session' || key === '_donePages' || key === '_redoPages' || key === '_pageRotations') return;
           var val = session[key];
-          if (val && val.metrics) {
-            session._donePages[key] = val.metrics;
-          }
+          if (val && val.metrics) { session._donePages[key] = val.metrics; }
         });
       }
-
-      // If import format has redo flags embedded in page entries, extract them
       if (!session._redoPages) {
         session._redoPages = {};
         Object.keys(session).forEach(function(key) {
-          if (key === '_session' || key === '_donePages' || key === '_redoPages') return;
+          if (key === '_session' || key === '_donePages' || key === '_redoPages' || key === '_pageRotations') return;
           var val = session[key];
-          if (val && val.redo) {
-            session._redoPages[key] = val.redo;
-          }
+          if (val && val.redo) { session._redoPages[key] = val.redo; }
+        });
+      }
+      // Extract rotations from page entries if _pageRotations block absent
+      if (!session._pageRotations) {
+        session._pageRotations = {};
+        Object.keys(session).forEach(function(key) {
+          if (key === '_session' || key === '_donePages' || key === '_redoPages' || key === '_pageRotations') return;
+          var val = session[key];
+          if (val && val.imageRotation) { session._pageRotations[key] = val.imageRotation; }
         });
       }
 
@@ -2191,6 +2046,11 @@ function setupEvents() {
   $('btnZoomIn').addEventListener('click', function() { zoomTo(zoom * 1.3); });
   $('btnZoomOut').addEventListener('click', function() { zoomTo(zoom / 1.3); });
   $('btnZoomReset').addEventListener('click', function() { zoom = 1; panX = 0; panY = 0; updateTransform(); });
+
+  // Rotation buttons
+  btnRotCW.addEventListener('click', rotateCW);
+  btnRotCCW.addEventListener('click', rotateCCW);
+  btnRotReset.addEventListener('click', rotateReset);
 
   imageViewport.addEventListener('wheel', function(e) {
     e.preventDefault();
@@ -2246,48 +2106,41 @@ function setupEvents() {
   });
 
   btnExport.addEventListener('click', exportEdits);
-
-  // Done button
   btnDone.addEventListener('click', togglePageDone);
-
-  // Redo button
   btnRedo.addEventListener('click', togglePageRedo);
-
-  // Import: open file picker
   btnImport.addEventListener('click', function() { sessionFileInput.click(); });
   sessionFileInput.addEventListener('change', function(e) {
     var file = e.target.files && e.target.files[0];
     if (file) importSessionFromFile(file);
-    sessionFileInput.value = ''; // reset so same file can be re-imported
+    sessionFileInput.value = '';
   });
 
-  // Restore banner buttons
   btnRestore.addEventListener('click', function() {
     restoreBanner.style.display = 'none';
-    if (restoreBanner._sessionData) {
-      applySession(restoreBanner._sessionData, 'autosave');
-    }
+    if (restoreBanner._sessionData) { applySession(restoreBanner._sessionData, 'autosave'); }
   });
   btnDismiss.addEventListener('click', function() {
     restoreBanner.style.display = 'none';
-    // Clear the saved session so it doesn't reappear on next open
     try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
   });
 
   document.addEventListener('keydown', function(e) {
     if (e.target === editorTextarea) return;
-    if (e.key === 'ArrowLeft') { loadPage(currentPageIdx - 1); e.preventDefault(); }
+    if (e.key === 'ArrowLeft')  { loadPage(currentPageIdx - 1); e.preventDefault(); }
     if (e.key === 'ArrowRight') { loadPage(currentPageIdx + 1); e.preventDefault(); }
     if (e.key === 'r' || e.key === 'R') { if (!e.shiftKey) btnRegions.click(); }
     if (e.key === 'f' || e.key === 'F') fitToWidth();
     if ((e.key === 'd' || e.key === 'D') && e.shiftKey) { togglePageRedo(); e.preventDefault(); }
     else if (e.key === 'd' || e.key === 'D') togglePageDone();
+    // [ = rotate CCW,  ] = rotate CW,  \ = reset rotation
+    if (e.key === '[') { rotateCCW(); e.preventDefault(); }
+    if (e.key === ']') { rotateCW();  e.preventDefault(); }
+    if (e.key === '\\') { rotateReset(); e.preventDefault(); }
     if (e.key === '+' || e.key === '=') zoomTo(zoom * 1.3);
     if (e.key === '-') zoomTo(zoom / 1.3);
     if (e.key === '0') { zoom = 1; panX = 0; panY = 0; updateTransform(); }
   });
 
-  // Auto-save when user leaves the page / closes the tab
   window.addEventListener('beforeunload', function() {
     saveCurrentEdits();
     autoSaveToLocalStorage();
@@ -2329,7 +2182,6 @@ def main():
         print(f"\u274c Directory not found: {root}")
         return
 
-    # Resolve Google Drive image URLs
     print("\U0001f517 Resolving Google Drive image URLs...")
     image_urls = resolve_image_urls(root)
 
@@ -2338,7 +2190,6 @@ def main():
         print("     (This is fine if you open the HTML from within the book folder)")
     print()
 
-    # Build data
     print("\U0001f4c4 Building page data...")
     data = build_data(root, image_urls)
     total = len(data['pages'])
@@ -2352,7 +2203,6 @@ def main():
     print(f"   With layout regions: {with_xml}")
     print()
 
-    # Generate HTML
     print("\U0001f3d7\ufe0f  Generating HTML...")
     html = generate_html(data)
 
@@ -2372,6 +2222,12 @@ def main():
     else:
         print(f"   3. Keep the HTML next to the '{PAGES_SUBDIR}/' folder for images")
     print()
+    print("\U0001f504 Image rotation:")
+    print(f"   \u2022 Use the ↺ ↻ buttons in the image panel header to rotate 90°")
+    print(f"   \u2022 Keyboard: [ = CCW, ] = CW, \\ = reset rotation")
+    print(f"   \u2022 PageXML region overlays track the rotation automatically")
+    print(f"   \u2022 Per-page rotation is saved in localStorage and exported JSON")
+    print()
     print("\U0001f4be Session persistence:")
     print(f"   \u2022 Edits auto-save to browser localStorage every 1.5 s")
     print(f"   \u2022 Re-opening the same HTML in the same browser will offer to restore")
@@ -2381,7 +2237,7 @@ def main():
     print("\U0001f4ca Validation metrics:")
     print(f"   \u2022 Mark pages as 'Done' after correcting — triggers CER/WER calculation")
     print(f"   \u2022 Mark pages as 'Redo' to flag them for reprocessing")
-    print(f"   \u2022 Metrics are saved per-page and as aggregates in the exported JSON")
+    print(f"   \u2022 Metrics (incl. rotation) are saved per-page in the exported JSON")
     print(f"   \u2022 Keyboard shortcuts: D to toggle done, Shift+D to toggle redo")
     print()
     print("   To generate for another book, change BOOK_ROOT_DIR and re-run!")
