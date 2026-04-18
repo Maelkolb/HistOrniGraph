@@ -2,7 +2,7 @@
 
 Two prompt variants:
   DETECTION_PROMPT        – single-page (after splitting, or a single-page scan)
-  DETECTION_PROMPT_DOUBLE – full double-page scan (with insert awareness)
+  DETECTION_PROMPT_DOUBLE – full double-page scan
 
 The double-page prompt enforces:
   • Each physical insert is ONE region (no sub-region splitting by content type)
@@ -44,13 +44,13 @@ bbox format: {{"x": left, "y": top, "width": w, "height": h}}
 
 REGION TYPES (use exactly these names):
 ParagraphRegion · ListRegion · TableRegion · ObjectRegion · PageNumberRegion · \
-MarginaliaRegion · FootnoteRegion · ImageRegion
+MarginaliaRegion · FootnoteRegion · ImageRegion · InsertRegion
 
 INSERT SHEETS
-If a loose insert sheet is partially visible in this half-page, treat its entire
-visible content as a single region (do not subdivide it) and add:
+If any type of paper insert is visible in this image, treat its entire
+visible insert as a single InsertRegion (do not subdivide it) and add:
   "page_side": "insert", "insert_id": 1, "insert_state": "visible"
-If the insert is folded and unreadable, use type "ObjectRegion" and add:
+If the insert is folded and unreadable, use type "InsertRegion" and add:
   "page_side": "insert", "insert_id": 1, "insert_state": "folded"
 
 RULES
@@ -74,7 +74,7 @@ OUTPUT (JSON only, no commentary):
 # Double-page prompt — used when the full unsplit scan is sent to the detector.
 DETECTION_PROMPT_DOUBLE = """\
 You are a document-layout analyst for digitised double-page scans of a German \
-ornithologist's handwritten/printed field journal (19th–20th century).
+ornithologist's handwritten field journal (20th century).
 
 CONTEXT
 This image contains TWO journal pages side by side (left page and right page).
@@ -93,7 +93,7 @@ bbox format: {{"x": left, "y": top, "width": w, "height": h}}
 
 REGION TYPES (use exactly these names):
 ParagraphRegion · ListRegion · TableRegion · ObjectRegion · PageNumberRegion · \
-MarginaliaRegion · FootnoteRegion · ImageRegion
+MarginaliaRegion · FootnoteRegion · ImageRegion · InsertRegion
 
 PAGE ASSIGNMENT — required for every region:
 • "page_side": "left" | "right" | "insert"
@@ -104,17 +104,15 @@ PAGE ASSIGNMENT — required for every region:
 INSERT RULES — read carefully:
 ① Group all content from the SAME physical insert under one "insert_id" integer
   (insert_id: 1, 2, …).
-② A FULLY VISIBLE insert (readable content) whose area is large (e.g. covers
-  most of one page) MUST be captured as a SINGLE region with one bounding box
+② A FULLY VISIBLE insert MUST be captured as a SINGLE region with one bounding box
   that encloses the entire insert — do NOT subdivide it into separate paragraph /
-  table / image sub-regions.  Use the dominant content type as the region type.
+  table / image sub-regions.  Use the region type InsertRegion and add "page_side": "insert", "insert_id": 1, "insert_state": "visible"
 ③ A FOLDED insert (showing only its back or blank/exterior side — no readable
   text) → create exactly ONE region with:
-    type: "ObjectRegion", page_side: "insert", insert_id: <n>,
+    type: "InsertRegion", page_side: "insert", insert_id: <n>,
     insert_state: "folded"
   Do NOT create sub-regions inside a folded insert.
-④ A smaller insert (business-card sized or occupying less than ~15 % of the
-  image) may be broken into content sub-regions, but keep them few and sensible.
+
 
 INSERT STATE — required for every insert region:
 • "insert_state": "visible"  → readable content

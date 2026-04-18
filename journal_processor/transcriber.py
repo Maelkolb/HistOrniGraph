@@ -20,8 +20,9 @@ log = logging.getLogger(__name__)
 # ── Prompt templates ────────────────────────────────────────────────────────
 
 _TEXT_PROMPT = """\
-Transcribe the German text in this image region exactly as written, \
-character by character, line by line.
+Transcribe the German text in this image exactly as written, \
+character by character, line by line. It is part of a german ornithologists journal. 
+Locations, as well as species are typically <u>underligned</u>. 
 
 Region type: {region_type}
 
@@ -60,6 +61,20 @@ Format your answer as:
 DESCRIPTION: …
 TEXT: … (or "none")
 DRAWING_TYPE: …"""
+
+_LIST_PROMPT = """\
+Transcribe the German image regions as a List. \
+character by character.
+
+Rules:
+- Output each list item as a Markdown bullet: start the line with "- ".
+- Preserve the original text of each item exactly.
+- Mark underlined words like this: <u>word</u>
+- Mark superscript (e.g. reference numbers) like this: <sup>3</sup>
+- Use [?] for uncertain characters and [illegible] for unreadable words.
+- Do NOT add interpretations, translations, or commentary.
+
+Output ONLY the Markdown list."""
 
 _OBJECT_PROMPT = """\
 Describe this object/element from a German ornithologist's journal page.
@@ -127,11 +142,13 @@ class Transcriber:
                 rows=region.get("rows", "?"),
                 cols=region.get("cols", "?"),
             )
+        if rtype == "ListRegion":
+            return _LIST_PROMPT
         if rtype == "ImageRegion":
             return _IMAGE_PROMPT
         if rtype == "ObjectRegion":
             return _OBJECT_PROMPT
-        # ParagraphRegion, ListRegion, FootnoteRegion, MarginaliaRegion
+        # ParagraphRegion, FootnoteRegion, MarginaliaRegion
         return _TEXT_PROMPT.format(region_type=rtype)
 
     # ── Gemini call ─────────────────────────────────────────────────────

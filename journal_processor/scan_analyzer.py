@@ -1,144 +1,113 @@
-"""Agentic scan analysis: decide how each scan should be processed.
+"""Scan analysis: rotation detection and split routing for each raw scan.
 
-A fast, cheap Gemini call inspects each raw scan and returns:
-  - layout        : "double_page" or "single_page"
-  - use_double_page: True  → send full scan to region detector (no split)
-                    False → split down the centre first
-  - has_inserts   : whether any loose insert sheets are visible
-  - folded_inserts: count of inserts that are folded / unreadable
+Rotation is detected from the image aspect ratio — no model needed:
+  landscape (width > height) → already upright, no rotation
+  portrait  (height > width) → scan is sideways, rotate 90° before splitting
 
-The result drives per-scan routing inside the Pipeline, so different images
-in the same batch can be handled differently.
+The model's only job is to decide split vs. no-split and count loose inserts.
 """
 
+import io
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict
 
-from .utils import MIME_BY_EXT, clean_llm_json
+from PIL import Image
+
+from .utils import clean_llm_json
 
 log = logging.getLogger(__name__)
 
+# Aspect ratio threshold: if height/width exceeds this, treat as rotated.
+# 1.1 gives a small margin so near-square images don't false-trigger.
+_PORTRAIT_THRESHOLD = 1.1
 
-# ── Prompt ───────────────────────────────────────────────────────────────────
 
-ANALYSIS_PROMPT = """\
-You are examining a scan from a bound field journal.
+_PROMPT = """\
+You are analysing a correctly-oriented scan from a bound German ornithologist's \
+field journal. The image is already upright — text reads horizontally.
 
-Analyse the image and answer the following questions as accurately as possible.
+1. USE_DOUBLE_PAGE
+   Does this scan show two journal pages side by side (a double-page spread)?
+     false = two pages visible — split down the centre (default)
+     true  = send the full image unsplit
 
-1. LAYOUT
-   Is this a double-page spread (two pages visible side by side from an open
-   bound book) or a single page?
-   → "double_page" or "single_page"
+   Set true ONLY when:
+     • if splitting the image results in cut off pages because of scan orientation OR
+     • A loose unattached sheet of paper or physical object (not glued down)
+       crosses the centre line and would be cut by a vertical split.
+   Glued items (photos, maps, postcards) do NOT prevent splitting.
 
-2. USE_DOUBLE_PAGE
-   Should this image be sent to the layout detector WITHOUT splitting it first?
+2. NOTES  one short sentence about anything unusual, or ""
 
-   Answer true (no split) if ANY of the following apply:
-   • The image is a single page.
-   • Loose insert sheets are visible anywhere in the image — inserts that cross
-     the centre line would be destroyed by a crop-split.
-   • The central gutter / spine is unclear or missing.
-
-   Answer false (split recommended) ONLY if ALL of these hold:
-   • It is clearly a double-page spread.
-   • No loose insert sheets are visible.
-   • There is a well-defined central gutter separating the two pages.
-
-   → true or false
-
-3. HAS_INSERTS
-   Are any loose insert sheets (separate pieces of paper tucked into the
-   journal) visible in the image?
-   → true or false
-
-4. FOLDED_INSERTS
-   How many of those inserts are clearly folded — showing only their back or
-   blank/exterior side with no readable text content?
-   → integer (0 if no inserts or all inserts are fully open and readable)
-
-5. NOTES
-   One short sentence about anything unusual (e.g. severely damaged page,
-   extremely faint writing, insert covers most of the left page, etc.).
-   Omit if nothing notable.
-   → string or ""
-
-OUTPUT — JSON only, no commentary, no markdown fences:
-{{"layout": "…", "use_double_page": …, "has_inserts": …, "folded_inserts": …, "notes": "…"}}
+Output JSON only:
+{"use_double_page": false, "notes": ""}
 """
 
 
 class ScanAnalyzer:
-    """Run a fast Gemini call to decide how each scan should be processed."""
 
     def __init__(self, client: Any, cfg: Any) -> None:
         self.client = client
         self.cfg = cfg
 
     def analyse(self, image_path: Path) -> Dict[str, Any]:
-        """Return an analysis dict for *image_path*.
-
-        Keys:
-            layout           – "double_page" | "single_page"
-            use_double_page  – bool: send full scan to detector (no split)
-            has_inserts      – bool
-            folded_inserts   – int
-            notes            – str
-
-        Falls back to a conservative default (no split, double-page prompt)
-        on any error so the scan is still processed rather than silently skipped.
-        """
-        from google.genai import types
-
-        ext = image_path.suffix.lower()
-        mime = MIME_BY_EXT.get(ext, "image/png")
         img_bytes = image_path.read_bytes()
 
         try:
+            # ── Rotation: aspect ratio, no model needed ───────────────────────
+            img = Image.open(io.BytesIO(img_bytes))
+            rotation = 90 if img.height > img.width * _PORTRAIT_THRESHOLD else 0
+            if rotation:
+                log.info(
+                    "%s is portrait (%dx%d) — auto rotation 90°",
+                    image_path.name, img.width, img.height,
+                )
+                img = img.rotate(-90, expand=True)
+
+            # ── Split decision: send upright image to model ───────────────────
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+
+            from google.genai import types
+
             resp = self.client.models.generate_content(
                 model=self.cfg.analyzer_model_id,
                 contents=[
-                    types.Part.from_bytes(data=img_bytes, mime_type=mime),
-                    ANALYSIS_PROMPT,
+                    types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png"),
+                    _PROMPT,
                 ],
                 config=types.GenerateContentConfig(
-                    max_output_tokens=256,
-                    # "minimal" = lowest latency/cost thinking level for flash-lite
-                    thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+                    max_output_tokens=4096,
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
+                    response_mime_type="application/json",
                 ),
             )
-            raw = clean_llm_json(resp.text)
-            data = json.loads(raw)
+
+            text = resp.text
+            if text is None:
+                raise ValueError("empty response")
+            data = json.loads(clean_llm_json(text))
 
             result: Dict[str, Any] = {
-                "layout": str(data.get("layout", "double_page")),
-                "use_double_page": bool(data.get("use_double_page", True)),
-                "has_inserts": bool(data.get("has_inserts", False)),
-                "folded_inserts": int(data.get("folded_inserts", 0)),
-                "notes": str(data.get("notes", "")),
+                "rotation":        rotation,
+                "use_double_page": bool(data.get("use_double_page", False)),
+                "notes":           str(data.get("notes", "")),
             }
+
             log.info(
-                "Analysis %s → layout=%s use_double_page=%s inserts=%s folded=%d%s",
+                "Analysis %s → rotation=%d use_double_page=%s%s",
                 image_path.name,
-                result["layout"],
+                result["rotation"],
                 result["use_double_page"],
-                result["has_inserts"],
-                result["folded_inserts"],
-                f" notes: {result['notes']}" if result["notes"] else "",
+                f"  notes: {result['notes']}" if result["notes"] else "",
             )
             return result
 
         except Exception as exc:
             log.warning(
-                "Scan analysis failed for %s (%s) — defaulting to no-split double-page mode",
+                "Scan analysis failed for %s (%s) — defaulting to full-image",
                 image_path.name, exc,
             )
-            return {
-                "layout": "double_page",
-                "use_double_page": True,
-                "has_inserts": False,
-                "folded_inserts": 0,
-                "notes": f"[analysis_error: {exc}]",
-            }
+            return {"rotation": 0, "use_double_page": True, "notes": f"[error: {exc}]"}

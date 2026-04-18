@@ -136,6 +136,25 @@ class Pipeline:
         )
         return summary
 
+    # ── Rotation helper ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_rotation(scan: Path, pages_dir: Path, rotation: int) -> Path:
+        """Return a rotated copy of *scan* saved under the original stem in *pages_dir*.
+
+        Using the original stem ensures that downstream split_double_page produces
+        clean _L / _R names (e.g. uuid_0048_L.png) rather than uuid_0048_rot_L.png.
+        Returns *scan* itself when no rotation is needed.
+        """
+        if not rotation:
+            return scan
+        img = Image.open(scan).convert("RGB")
+        img = img.rotate(-rotation, expand=True)
+        dest = pages_dir / (scan.stem + ".png")
+        img.save(dest, "PNG")
+        log.info("Rotated %s by %d° → %s", scan.name, rotation, dest.name)
+        return dest
+
     # ── Scan discovery ───────────────────────────────────────────────────
 
     def _find_scans(self) -> List[Path]:
@@ -173,12 +192,21 @@ class Pipeline:
                 use_double_page = self.cfg.double_page_mode
                 analysis = None
 
+            rotation = (
+                analysis.get("rotation", 0)
+                if analysis
+                else self.cfg.force_rotation
+            )
+
             if not use_double_page:
                 # Split path: produce _L and _R working copies
                 try:
+                    src = self._apply_rotation(scan, pages_dir, rotation)
                     left, right = split_double_page(
-                        scan, pages_dir, self.cfg.split_overlap_px
+                        src, pages_dir, self.cfg.split_overlap_px
                     )
+                    if src != scan:
+                        src.unlink(missing_ok=True)
                     tasks.append((left, False))
                     tasks.append((right, False))
                 except Exception as exc:
@@ -190,6 +218,9 @@ class Pipeline:
                 try:
                     if not dest.exists() or dest.stat().st_mtime < scan.stat().st_mtime:
                         img = Image.open(scan).convert("RGB")
+                        if rotation:
+                            img = img.rotate(-rotation, expand=True)
+                            log.info("Rotated %s by %d°", scan.name, rotation)
                         img.save(dest, "PNG")
                     tasks.append((dest, True))
                 except Exception as exc:

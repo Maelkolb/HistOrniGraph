@@ -10,6 +10,9 @@ Force split-only (old workflow):
 Force double-page (no split):
     python run.py --input … --output … --no-auto --double-page
 
+Pre-rotate all images 90° clockwise then split:
+    python run.py --input … --output … --no-auto --split --rotate 90
+
 Requires:
     - GOOGLE_API_KEY environment variable set
     - pip install google-genai Pillow
@@ -69,6 +72,14 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--rotate", type=int, choices=[0, 90, 180, 270], default=0,
+        help=(
+            "Pre-rotate all input images by this many degrees clockwise before "
+            "splitting or full-page processing (0, 90, 180, or 270).  "
+            "Ignored in auto mode (the analyzer detects rotation automatically)."
+        ),
+    )
     parser.add_argument(
         "--max-regions", type=int, default=None,
         help=(
@@ -141,6 +152,7 @@ def main() -> None:
         use_glm_ocr=args.use_glm_ocr,
         glm_ocr_base_model=args.glm_ocr_base,
         glm_ocr_lora_path=args.glm_ocr_lora,
+        force_rotation=args.rotate,
     )
     if args.max_regions is not None:
         cfg_kwargs["max_regions"] = args.max_regions

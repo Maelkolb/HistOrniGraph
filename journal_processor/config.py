@@ -20,7 +20,7 @@ REGION_TYPES: List[str] = [
 ]
 
 # Region types that contain transcribable running text
-TEXT_REGION_TYPES = {"ParagraphRegion", "ListRegion", "FootnoteRegion", "MarginaliaRegion"}
+TEXT_REGION_TYPES = {"ParagraphRegion", "ListRegion", "FootnoteRegion"}
 
 # Region types included in the ShareGPT training-data export
 SHAREGPT_REGION_TYPES = {"ParagraphRegion", "ListRegion", "TableRegion", "FootnoteRegion"}
@@ -35,7 +35,7 @@ MAX_REGIONS_DOUBLE_PAGE = 10
 # Models
 # ---------------------------------------------------------------------------
 MODEL_ID = "gemini-3-flash-preview"
-ANALYZER_MODEL_ID = "gemini-3.1-flash-lite-preview"   # cheap routing model
+ANALYZER_MODEL_ID = "gemini-3-flash-preview"   # same as main model — lite was too weak for rotation detection
 
 # ---------------------------------------------------------------------------
 # Pipeline defaults
@@ -88,11 +88,11 @@ class PipelineConfig:
     # Gemini 3 docs: keep temperature at 1.0 (default); values < 1.0 may cause
     # looping or degraded performance on complex tasks.
     detection_temperature: float = 1.0
-    detection_thinking: str = "medium"
+    detection_thinking: str = "high"
     detection_retries: int = 2          # retry on bad JSON from Gemini
 
     # Transcription (Gemini — always used for tables/images/objects)
-    transcription_temperature: float = 1.0
+    transcription_temperature: float = 0.0
     transcription_thinking: str = "low"
 
     # Transcription (GLM-OCR — used for text regions when enabled)
@@ -108,6 +108,9 @@ class PipelineConfig:
 
     # ShareGPT
     sharegpt_system_prompt: str = "Transcribe the german text in this image region."
+
+    # Pre-rotation (applied before splitting or full-page processing)
+    force_rotation: int = 0             # 0, 90, 180, or 270 degrees clockwise
 
     # Concurrency
     workers: int = 4                    # parallel page processing threads
