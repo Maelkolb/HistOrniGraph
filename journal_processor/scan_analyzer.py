@@ -34,8 +34,8 @@ field journal. The image is already upright — text reads horizontally.
      true  = send the full image unsplit
 
    Set true ONLY when:
-     • if splitting the image results in cut off pages because of scan orientation OR
-     • A loose unattached sheet of paper or physical object (not glued down)
+     • if splitting the image in the middle would ruin the text recognition results because of scan orientation OR
+     • A loose unattached sheet of paper or physical object
        crosses the centre line and would be cut by a vertical split.
    Glued items (photos, maps, postcards) do NOT prevent splitting.
 

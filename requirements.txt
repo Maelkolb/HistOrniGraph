@@ -3,6 +3,12 @@ Pillow>=10.0.0
 numpy>=1.24.0
 scipy>=1.11.0       # optional: only needed for --deskew
 
+# Corpus analysis (build_corpus.py / analyze_timeline.py)
+folium>=0.15.0
+geopy>=2.4.0
+plotly>=5.18.0
+pandas>=2.0.0
+
 # Optional: only needed with --use-glm-ocr
 # pip install git+https://github.com/huggingface/transformers.git
 # pip install peft accelerate sentencepiece

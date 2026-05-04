@@ -58,31 +58,21 @@ OUTPUT_BASE_DIR = Path(r"G:\My Drive\HistOrniGraph_output")    # ← edit me
 JOBS: List[Dict[str, Any]] = [
 
 
-   # {
-        #"folder":  r"NL Laubmann_30\NL Laubmann_30",
-       # "output":  "Laubmann_30_gemini",
-        #"images":  [10,25,30,45,83,108,110,123,127],
-       # "mode":    "split",
-    #},
-    {
-        "folder":  r"NL Laubmann_23\NL Laubmann_23",
-        "output":  "Laubmann_23_gemini",
-        "images":  [10,25,30,45,83,108,110],
-        "mode":    "auto",
+	{
+        "folder":  r"NL Laubmann_34/NL Laubmann_34",
+        "output":  "Laubmann_34_gemini",
+        "images":  [6,13,20,22,26,29,31,42,72],
+        "mode":    "split",
+        "rotate":  270,
     },
-     #{
-      #  "folder":  r"NL Laubmann_30\NL Laubmann_30",
-       # "output":  "Laubmann_30_gemini",
-        #"images":  [24,86],
-        #"mode":    "full-page",
-    #},
-    #{
-        #"folder":  r"NL Laubmann_30/NL Laubmann_30",
-        #"output":  "Laubmann_30_gemini",
-       # "images":  [48],
-       #"mode":    "split",
-        #"rotate":  270,
-   # },
+    	{
+        "folder":  r"NL Laubmann_34/NL Laubmann_34",
+        "output":  "Laubmann_34_gemini",
+        "images":  [4,14,15,16,17,18,21,24,28,30,34,35,36,37,38,39,40,41,44,45,46,49,50,51,52,53,54,55,56,57,58,59,60,63,67,68],
+        "mode":    "split",
+    },
+    
+    
    
     # ── All of folder 27, auto mode ───────────────────────────────────────────
     # {
@@ -109,13 +99,7 @@ JOBS: List[Dict[str, Any]] = [
     #     "rotate":  90,
     # },
 
-    # ── Double-page spreads, send unsplit ─────────────────────────────────────
-    # {
-    #     "folder":  "Gemini Laubmann 03",
-    #     "output":  "Laubmann_03_gemini",
-    #     "images":  [5, 6, 7],
-    #     "mode":    "full-page",
-    # },
+ 
 ]
 
 # ─── Implementation ───────────────────────────────────────────────────────────
