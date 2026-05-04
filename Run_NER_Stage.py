@@ -11,15 +11,31 @@ Usage in Colab
 1. Mount Google Drive
 2. Set GEMINI_API_KEY (e.g. via google.colab.userdata.get('GEMINI_API_KEY')
    or os.environ — the google-genai client picks it up automatically).
-3. Set BOOKS_ROOT_DIR (or BOOK_ROOT_DIR for a single book) below.
-4. Run all cells.
+3. Pick what to process. Either:
+     a) Set the environment variables before %run::
+
+          import os
+          os.environ['BOOK_ROOT_DIR'] = '/content/drive/.../Laubmann_01_gemini'
+          %run Run_NER_Stage.py
+
+        (works with plain ``%run`` — fresh namespace, env vars survive),
+
+     or
+     b) Use ``%run -i`` so the notebook globals are visible to the script::
+
+          BOOK_ROOT_DIR_OVERRIDE = '/content/drive/.../Laubmann_01_gemini'
+          %run -i Run_NER_Stage.py
+
+4. Run.
 
 Output structure
 ----------------
 For every book folder ``<root>/<book>/pagexml/*.xml`` the script writes
 ``<root>/<book>/pagexml_ner/*.xml``.  The annotated XML files are
-identical to the originals plus a ``<NamedEntities>`` block under
-``<Page>`` listing every detected entity with its region reference.
+identical to the originals plus inline ``namedentity {offset; length;
+type;}`` tags on each TextRegion's ``custom`` attribute (Transkribus
+convention) and a denormalised ``<NamedEntities>`` index block under
+``<Page>``.
 
 The original ``pagexml/`` folder is never modified — re-runs are safe.
 By default already-annotated pages are skipped (set ``SKIP_EXISTING=False``
@@ -32,24 +48,63 @@ import sys
 import time
 from pathlib import Path
 
-# ═══════════════════════════════════════════════════════════
-# CONFIGURATION — change these for your run
-# ═══════════════════════════════════════════════════════════
 
-# Process EITHER one book (BOOK_ROOT_DIR) OR all books under BOOKS_ROOT_DIR.
-# Allow notebook overrides via globals().
-BOOK_ROOT_DIR  = globals().get("BOOK_ROOT_DIR_OVERRIDE",
-    "")  # e.g. "/content/drive/MyDrive/HistOrniGraph_output/Laubmann_01_gemini"
+# ═══════════════════════════════════════════════════════════
+# CONFIGURATION RESOLUTION
+# ═══════════════════════════════════════════════════════════
+#
+# Priority order for every override below:
+#   1. os.environ[NAME]                         — survives plain `%run`
+#   2. IPython user namespace                   — works with `%run -i`
+#   3. globals()                                — same script's own globals
+#   4. fallback default
+#
+# Plain ``%run script.py`` executes the script in a *fresh* namespace,
+# so ``globals()`` here does NOT see notebook variables.  ``%run -i``
+# does share globals.  The IPython lookup below works in both cases when
+# variables are set in the notebook.
 
-BOOKS_ROOT_DIR = globals().get("BOOKS_ROOT_DIR_OVERRIDE",
-    "/content/drive/MyDrive/HistOrniGraph_output")
+def _resolve(name: str, default):
+    """Return the first value found in env / IPython / globals, else default."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    try:
+        from IPython import get_ipython  # type: ignore
+        ip = get_ipython()
+        if ip is not None and name in ip.user_ns:
+            v = ip.user_ns.get(name)
+            if v not in (None, ""):
+                return v
+    except Exception:
+        pass
+    if name in globals():
+        v = globals().get(name)
+        if v not in (None, ""):
+            return v
+    return default
+
+
+# Process EITHER one book (BOOK_ROOT_DIR) OR every book under BOOKS_ROOT_DIR.
+BOOK_ROOT_DIR  = _resolve("BOOK_ROOT_DIR_OVERRIDE",  "") or _resolve("BOOK_ROOT_DIR", "")
+BOOKS_ROOT_DIR = _resolve("BOOKS_ROOT_DIR_OVERRIDE", "") or _resolve(
+    "BOOKS_ROOT_DIR", "/content/drive/MyDrive/HistOrniGraph_output"
+)
 
 # Gemini model and thinking level
-NER_MODEL_ID        = globals().get("NER_MODEL_ID_OVERRIDE",        "gemini-3-flash-preview")
-NER_THINKING_LEVEL  = globals().get("NER_THINKING_LEVEL_OVERRIDE",  "low")
+NER_MODEL_ID       = _resolve("NER_MODEL_ID_OVERRIDE",       "") or _resolve(
+    "NER_MODEL_ID", "gemini-3-flash-preview"
+)
+NER_THINKING_LEVEL = _resolve("NER_THINKING_LEVEL_OVERRIDE", "") or _resolve(
+    "NER_THINKING_LEVEL", "low"
+)
 
 # Skip pages whose annotated XML already exists in pagexml_ner/
-SKIP_EXISTING = globals().get("SKIP_EXISTING_OVERRIDE", True)
+_skip_raw = _resolve("SKIP_EXISTING_OVERRIDE", None)
+if _skip_raw is None:
+    _skip_raw = _resolve("SKIP_EXISTING", True)
+SKIP_EXISTING = _skip_raw if isinstance(_skip_raw, bool) else \
+    str(_skip_raw).strip().lower() not in {"0", "false", "no", "off", ""}
 
 # Subdirectory names — change only if your output layout differs
 PAGEXML_SUBDIR     = "pagexml"
