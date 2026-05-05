@@ -2,22 +2,40 @@
 ============================================================
 HistOrniGraph — Transcription Validation GUI Generator
 ============================================================
-Run this script in Google Colab to generate a standalone HTML
-validation interface for each book in your corpus.
+Generates a standalone HTML validation interface for each book
+in your corpus.  Images are referenced via shared Google Drive
+URLs so the resulting HTML works on any machine — your home PC,
+your office laptop, a phone — without needing the Drive folder
+to be present locally.
 
-Images are referenced via Google Drive URLs so the HTML file
-works standalone — no need to keep folder structure intact.
-
-Usage in Colab:
-    1. Mount Google Drive
+Recommended workflow:
+    1. Mount Google Drive in Colab
     2. Set BOOK_ROOT_DIR below
-    3. Run all cells
-    4. HTML file is saved into the book root folder
-    5. Download the HTML and open in any browser
+    3. Run this script in Colab — it resolves every page image
+       to a Drive file ID, writes the IDs to
+           <BOOK_ROOT_DIR>/.image_url_cache.json,
+       and produces the HTML.
+    4. Download the HTML → open anywhere, images load from Drive.
+
+Cross-machine regeneration:
+    The .image_url_cache.json file is auto-saved next to the book
+    after every successful Colab run.  If you later regenerate the
+    GUI from a non-Colab machine (e.g. VS Code on Windows with
+    Drive Desktop synced as G:\\My Drive\\...), the cached file IDs
+    are reused — no Drive API auth needed, no 'file:///' paths,
+    no broken images at work.  Delete the cache to force a fresh
+    Drive walk.
 
 IMPORTANT: The 'pages' folder must be shared as
 "Anyone with the link can view" for images to load.
-The script will offer to do this automatically.
+The script will offer to do this automatically when run in Colab.
+
+Browser-side robustness:
+    If the primary thumbnail URL ever fails for an individual image
+    (rate-limit, oversize file, transient Drive issue), the GUI
+    transparently retries with alternative Drive URL formats
+    (lh3.googleusercontent.com → uc?export=view → smaller thumbnail)
+    before giving up.
 
 SESSION PERSISTENCE:
     - Auto-saves progress to browser localStorage after every edit
@@ -195,10 +213,55 @@ def share_folder_anyone_with_link(folder_id):
 
 
 def get_drive_relative_path(local_path):
-    markers = ["/content/drive/MyDrive/", "/content/drive/My Drive/"]
-    for marker in markers:
-        if local_path.startswith(marker):
-            return local_path[len(marker):]
+    """
+    Convert a local path that lives inside a Google Drive mount/sync to its
+    "My Drive"-relative form, so the Drive API can find the same folder by
+    walking from the user's Drive root.
+
+    Supports:
+      • Colab            /content/drive/MyDrive/...      /content/drive/My Drive/...
+      • Windows + Drive  G:\\My Drive\\...     G:/My Drive/...     (any drive letter)
+      • macOS            ~/Google Drive/My Drive/...     ~/Library/CloudStorage/GoogleDrive-*/My Drive/...
+      • Linux/rclone     ~/GoogleDrive/...               ~/gdrive/...
+    Anything else returns None (caller should fall back to the cache or relative paths).
+    """
+    # Normalise separators so a single regex set covers Windows + POSIX
+    norm = local_path.replace("\\", "/")
+
+    # Expand ~ if present
+    if norm.startswith("~"):
+        norm = os.path.expanduser(norm).replace("\\", "/")
+
+    # 1. Colab mount points
+    for marker in ("/content/drive/MyDrive/", "/content/drive/My Drive/"):
+        if norm.startswith(marker):
+            return norm[len(marker):]
+
+    # 2. Windows Drive Desktop: any drive letter followed by "/My Drive/"
+    m = re.match(r'^[A-Za-z]:/My Drive/(.*)$', norm)
+    if m:
+        return m.group(1)
+
+    # 3. macOS Drive Desktop (modern + legacy)
+    home = os.path.expanduser("~").replace("\\", "/")
+    mac_markers = [
+        f"{home}/Library/CloudStorage/",   # GoogleDrive-<email>/My Drive/...
+        f"{home}/Google Drive/My Drive/",
+        f"{home}/Google Drive/",           # legacy "G Suite" layout
+    ]
+    for marker in mac_markers:
+        if norm.startswith(marker):
+            tail = norm[len(marker):]
+            # Strip a leading "GoogleDrive-foo@bar.com/My Drive/" segment if present
+            tail = re.sub(r'^GoogleDrive-[^/]+/My Drive/', '', tail)
+            tail = re.sub(r'^My Drive/', '', tail)
+            return tail
+
+    # 4. Linux rclone / generic
+    for marker in (f"{home}/GoogleDrive/", f"{home}/gdrive/", f"{home}/drive/"):
+        if norm.startswith(marker):
+            return norm[len(marker):]
+
     return None
 
 
@@ -206,18 +269,83 @@ def build_image_url(file_id):
     return f"https://drive.google.com/thumbnail?id={file_id}&sz=w2000"
 
 
+# ── File-ID cache ──────────────────────────────────────────────────────────
+# Once the file IDs have been resolved by the Drive API (typically from Colab)
+# they are written next to the book as `.image_url_cache.json`. From then on,
+# any future run — Colab, VS Code at home, a laptop at work, anywhere — can
+# regenerate the GUI from the cache without re-authenticating to Drive.
+URL_CACHE_FILENAME = ".image_url_cache.json"
+
+
+def load_url_cache(root_dir):
+    """Return {filename: file_id} from the cache file, or {} if missing/invalid."""
+    cache_path = os.path.join(root_dir, URL_CACHE_FILENAME)
+    if not os.path.isfile(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("file_ids"), dict):
+            return data["file_ids"]
+    except Exception as e:
+        print(f"   ⚠ Could not read cache {cache_path}: {e}")
+    return {}
+
+
+def save_url_cache(root_dir, file_id_map):
+    """Persist {filename: file_id} so the next run can skip Drive API auth."""
+    cache_path = os.path.join(root_dir, URL_CACHE_FILENAME)
+    try:
+        payload = {
+            "_comment": ("Auto-generated by Create_GUIs.py. Maps page-image filename → "
+                         "Google Drive file ID. Safe to commit/share; file IDs are not "
+                         "secret. Delete this file to force a fresh resolve."),
+            "file_ids": file_id_map,
+        }
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
+        print(f"   ✓ Cached {len(file_id_map)} file IDs → {URL_CACHE_FILENAME}")
+    except Exception as e:
+        print(f"   ⚠ Could not write cache {cache_path}: {e}")
+
+
 def resolve_image_urls(root_dir):
+    """
+    Return (url_map, file_id_map):
+      url_map     : {filename: thumbnail_url}      ← used as the primary <img src>
+      file_id_map : {filename: drive_file_id}      ← used by JS to build fallback URLs
+
+    Strategy (in order, stopping at the first to succeed):
+      1. Cached file IDs in <root>/.image_url_cache.json  (works from anywhere)
+      2. Live Drive API resolve  (Colab: zero-config; local: needs OAuth setup)
+      3. Empty maps  →  build_data falls back to relative `pages/<file>` paths
+    """
+    # 1. Cache (works on any machine, no auth needed)
+    cached_ids = load_url_cache(root_dir)
+    if cached_ids:
+        print(f"   ✓ Using {len(cached_ids)} cached Drive file IDs "
+              f"(from {URL_CACHE_FILENAME})")
+        url_map = {fn: build_image_url(fid) for fn, fid in cached_ids.items()}
+        return url_map, cached_ids
+
+    # 2. Live Drive API
     pages_local = os.path.join(root_dir, PAGES_SUBDIR)
     drive_rel = get_drive_relative_path(pages_local)
 
     if drive_rel is None:
-        print("   ⚠ Could not determine Drive path. Using relative paths.")
-        return {}
+        print(f"   ⚠ Path is not inside a recognised Google Drive mount:")
+        print(f"     {pages_local}")
+        print(f"     → Run this once from Colab to populate {URL_CACHE_FILENAME},")
+        print(f"       then any later run (incl. this machine) will reuse the cache.")
+        return {}, {}
 
     print(f"   Resolving Drive folder: My Drive/{drive_rel}")
     folder_id = find_drive_folder_id(drive_rel)
     if not folder_id:
-        return {}
+        print(f"   ⚠ Drive API resolution failed.")
+        print(f"     If you are not in Colab, run this once from Colab to "
+              f"populate {URL_CACHE_FILENAME}.")
+        return {}, {}
 
     print(f"   ✓ Found pages folder ID: {folder_id}")
 
@@ -227,14 +355,15 @@ def resolve_image_urls(root_dir):
             print("   ✓ Folder shared successfully")
 
     print("   Listing image files...")
-    file_map = list_files_in_folder(folder_id)
-    print(f"   ✓ Found {len(file_map)} files in pages folder")
+    file_id_map = list_files_in_folder(folder_id)
+    print(f"   ✓ Found {len(file_id_map)} files in pages folder")
 
-    url_map = {}
-    for filename, file_id in file_map.items():
-        url_map[filename] = build_image_url(file_id)
+    # Persist for next time
+    if file_id_map:
+        save_url_cache(root_dir, file_id_map)
 
-    return url_map
+    url_map = {fn: build_image_url(fid) for fn, fid in file_id_map.items()}
+    return url_map, file_id_map
 
 
 # ═══════════════════════════════════════════════════════════
@@ -433,9 +562,10 @@ def read_markdown(md_path):
 # BUILD DATA
 # ═══════════════════════════════════════════════════════════
 
-def build_data(root_dir, image_urls):
+def build_data(root_dir, image_urls, image_file_ids=None):
     pages_info, ner_active = discover_files(root_dir)
     book_name = os.path.basename(root_dir.rstrip("/"))
+    image_file_ids = image_file_ids or {}
 
     data = {
         "bookName": book_name,
@@ -450,16 +580,17 @@ def build_data(root_dir, image_urls):
         pagexml_data = parse_pagexml(p["pagexml_path"])
 
         img_url = None
+        drive_id = None
         if p["image_filename"]:
-            img_url = image_urls.get(
-                p["image_filename"],
-                f'{PAGES_SUBDIR}/{p["image_filename"]}'
-            )
+            fname = p["image_filename"]
+            img_url = image_urls.get(fname, f'{PAGES_SUBDIR}/{fname}')
+            drive_id = image_file_ids.get(fname)
 
         data["pages"].append({
             "stem": p["stem"],
             "imageFilename": p["image_filename"],
             "imagePath": img_url,
+            "driveFileId": drive_id,   # ← lets the browser build fallback URLs
             "markdown": md_content,
             "pagexml": pagexml_data,
         })
@@ -1362,6 +1493,7 @@ let redoPages = {};
 // Per-page rotation store: { stem: 0|90|180|270 }
 let pageRotations = {};
 let imageRotation = 0; // current page's rotation in degrees (0,90,180,270)
+let currentLoadToken = 0; // bumped every loadPage() so stale onerror chains abort
 let activeTab = 'edit';
 let pageLoaded = false;
 let autoSaveTimer = null;
@@ -1849,25 +1981,62 @@ function loadPage(idx) {
     imageLoading.classList.add('active');
     pageImage.style.display = 'none';
 
+    // Build a candidate-URL list. The primary (page.imagePath) is tried first;
+    // if it fails we fall back to alternative Drive URL formats that sometimes
+    // succeed when the thumbnail endpoint is rate-limited or the image is too
+    // large for thumbnail rendering.
+    var candidates = [page.imagePath];
+    if (page.driveFileId) {
+      var fid = page.driveFileId;
+      candidates.push('https://lh3.googleusercontent.com/d/' + fid + '=w2000');
+      candidates.push('https://drive.google.com/uc?export=view&id=' + fid);
+      candidates.push('https://drive.google.com/thumbnail?id=' + fid + '&sz=w1600');
+    }
+    // De-duplicate while preserving order
+    var seen = {};
+    candidates = candidates.filter(function(u) {
+      if (!u || seen[u]) return false;
+      seen[u] = true;
+      return true;
+    });
+
+    var attempt = 0;
+    var loadToken = ++currentLoadToken;  // cancel stale loads if user pages quickly
+
     pageImage.onload = function() {
+      if (loadToken !== currentLoadToken) return;
       imageLoading.classList.remove('active');
       pageImage.style.display = 'block';
       fitToWidth();
       drawRegions();
     };
     pageImage.onerror = function() {
+      if (loadToken !== currentLoadToken) return;
+      attempt++;
+      if (attempt < candidates.length) {
+        // Try next URL silently
+        pageImage.src = candidates[attempt];
+        return;
+      }
+      // All candidates exhausted
       imageLoading.classList.remove('active');
       pageImage.style.display = 'none';
       imageContainer.style.display = 'none';
       noImage.style.display = 'flex';
       var hint = noImage.querySelector('.hint');
-      if (page.imagePath.includes('drive.google.com')) {
+      if (page.driveFileId) {
+        hint.innerHTML =
+          'Drive image failed to load.<br>' +
+          'Make sure the <code>pages/</code> folder is shared as ' +
+          '"Anyone with the link can view".<br>' +
+          '<small>File ID: ' + page.driveFileId + '</small>';
+      } else if ((page.imagePath || '').indexOf('drive.google.com') !== -1) {
         hint.textContent = 'Drive image failed to load. Ensure the pages folder is shared as "Anyone with the link can view".';
       } else {
         hint.textContent = 'Image path: ' + page.imagePath;
       }
     };
-    pageImage.src = page.imagePath;
+    pageImage.src = candidates[0];
   } else {
     noImage.style.display = 'flex';
     noImage.querySelector('.hint').textContent = '';
@@ -2557,15 +2726,17 @@ def main():
         return
 
     print("\U0001f517 Resolving Google Drive image URLs...")
-    image_urls = resolve_image_urls(root)
+    image_urls, image_file_ids = resolve_image_urls(root)
 
     if not image_urls:
         print("   \u26a0 No Drive URLs resolved. Images will use relative paths.")
-        print("     (This is fine if you open the HTML from within the book folder)")
+        print("     The HTML will only show images when opened next to the 'pages/' folder.")
+        print(f"     → Run once from Colab to populate {URL_CACHE_FILENAME}; after that")
+        print("       this script can rebuild the GUI from any machine without auth.")
     print()
 
     print("\U0001f4c4 Building page data...")
-    data = build_data(root, image_urls)
+    data = build_data(root, image_urls, image_file_ids)
     total = len(data['pages'])
     with_img = sum(1 for p in data['pages'] if p['imagePath'])
     with_drive = sum(1 for p in data['pages'] if p['imagePath'] and 'drive.google.com' in str(p['imagePath']))
