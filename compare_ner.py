@@ -195,3 +195,114 @@ def compare_variants(book, variants, ref=None, pages=None, csv_out=None):
             w.writerows(rows)
         print(f"Per-span diffs vs '{ref}' -> {csv_out}  ({len(rows)} rows)")
     return stats
+
+
+# ── token-level comparison: which tokens each variant tagged ──────────────
+from xml.etree import ElementTree as _ET
+from journal_processor.ner_stage import (
+    _strip_with_map as _swm, _region_unicode as _ru, _local as _lc,
+    _TEXTLIKE_TAGS as _TLT,
+)
+from journal_processor.output_bio import _TOKEN_RE as _TRE, _raw_span_to_clean as _r2c
+
+
+def _page_token_labels(xml_path):
+    """{(region_id, token_index): (token, type)} for one annotated page."""
+    if not Path(xml_path).exists():
+        return {}
+    ents = [e for e in parse_named_entities(xml_path)
+            if not e.get("unmatched") and e.get("offset") is not None
+            and e.get("length") and e["length"] > 0]
+    by_region = {}
+    for e in ents:
+        by_region.setdefault(e.get("region_ref") or "", []).append(e)
+    root = _ET.parse(xml_path).getroot()
+    out = {}
+    for region in root.iter():
+        if _lc(region.tag) not in _TLT:
+            continue
+        raw = _ru(region)
+        if not raw:
+            continue
+        rid = region.get("id", "")
+        clean, raw_idx = _swm(raw)
+        toks = [(m.group(0), m.start(), m.end()) for m in _TRE.finditer(clean)]
+        labels = ["O"] * len(toks)
+        for e in by_region.get(rid, []):
+            cs, ce = _r2c(raw_idx, e["offset"], e["length"])
+            for ti, (_, ts, te) in enumerate(toks):
+                if ts < ce and te > cs:
+                    labels[ti] = e.get("entity_type") or "?"
+        for ti, (tok, _, _) in enumerate(toks):
+            out[(rid, ti)] = (tok, labels[ti])
+    return out
+
+
+def _abbr(t):
+    return "·" if t in ("O", "", None) else t[:2]
+
+
+def token_table(book, variants, pages=None, csv_out=None, show="disagree", max_print=45):
+    """Per-token type label for every variant, side by side.
+
+    show: 'disagree' (tokens where variants differ), 'tagged' (any tagged it),
+    or 'all'. Writes a wide CSV: one column per variant.
+    """
+    book = Path(book)
+    labels = list(variants)
+    page_sets = {lab: {p.name for p in (book / sub).glob("*.xml")}
+                 for lab, sub in variants.items()}
+    common = sorted(pages) if pages is not None else sorted(set.intersection(*page_sets.values()))
+    print(f"Token comparison on {len(common)} page(s); variants: {', '.join(labels)}\n")
+    if not common:
+        print("No common pages."); return []
+
+    merged = {}
+    for lab, sub in variants.items():
+        for name in common:
+            for (rid, ti), (tok, ty) in _page_token_labels(book / sub / name).items():
+                rec = merged.setdefault((name, rid, ti), {"token": tok, "labs": {}})
+                rec["labs"][lab] = ty
+
+    nvar = len(labels)
+    n_all = n_none = n_dis = 0
+    rows = []
+    for key in sorted(merged):
+        rec = merged[key]
+        types = [rec["labs"].get(lab, "O") for lab in labels]
+        tagged = [t for t in types if t != "O"]
+        if not tagged:
+            n_none += 1
+        elif len(tagged) == nvar and len(set(tagged)) == 1:
+            n_all += 1
+        else:
+            n_dis += 1
+        rows.append((key, rec["token"], types, len(tagged)))
+
+    print(f"tokens compared:       {len(rows)}")
+    print(f"  tagged by all (same): {n_all}")
+    print(f"  tagged by none:       {n_none}")
+    print(f"  disagreement:         {n_dis}\n")
+
+    def _is_dis(r):
+        tg = [t for t in r[2] if t != "O"]
+        return tg and not (len(tg) == nvar and len(set(tg)) == 1)
+    sel = (rows if show == "all"
+           else [r for r in rows if r[3] >= 1] if show == "tagged"
+           else [r for r in rows if _is_dis(r)])
+
+    print(f"{'token':16}" + "".join(f"{l[:7]:>9}" for l in labels))
+    for (key, tok, types, nt) in sel[:max_print]:
+        print(f"{tok[:16]:16}" + "".join(f"{_abbr(t):>9}" for t in types))
+    if len(sel) > max_print:
+        print(f"… {len(sel) - max_print} more (see CSV)")
+
+    if csv_out:
+        import csv as _csv
+        with open(csv_out, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.writer(fh)
+            w.writerow(["page", "region", "token_index", "token", "n_tagged"] + labels)
+            for (key, tok, types, nt) in sel:
+                w.writerow([key[0], key[1], key[2], tok, nt] + types)
+        print(f"\n-> {csv_out}  ({len(sel)} rows)")
+    return rows
