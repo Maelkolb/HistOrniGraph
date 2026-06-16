@@ -1,0 +1,140 @@
+<h2 class="sr-only">Two tabs: a token-level agreement grid showing which NER settings tagged each word, and a speed-versus-recall scatter of the seven settings.</h2>
+<style>
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.tabbtn{font-size:13px;padding:7px 14px;border:0.5px solid var(--color-border-secondary);background:transparent;border-radius:var(--border-radius-md);cursor:pointer;color:var(--color-text-secondary)}
+.tabbtn.on{background:var(--color-background-secondary);color:var(--color-text-primary);font-weight:500}
+.tg{width:100%;border-collapse:separate;border-spacing:3px;font-size:12px}
+.tg td{text-align:center;padding:3px 0;border-radius:4px;color:var(--color-text-tertiary)}
+.tg td.tok{text-align:left;font-size:13px;color:var(--color-text-primary);width:150px;white-space:nowrap}
+.tg th{font-size:11px;font-weight:500;color:var(--color-text-secondary);padding-bottom:4px}
+.tg td.sec{text-align:left;color:var(--color-text-secondary);font-weight:500;padding:12px 0 2px;font-size:12px}
+.mc{background:var(--color-background-secondary);border-radius:var(--border-radius-md);padding:10px 12px}
+.mc .v{font-size:22px;font-weight:500;color:var(--color-text-primary)}
+.mc .l{font-size:12px;color:var(--color-text-secondary)}
+</style>
+
+<div style="display:flex;gap:8px;margin:0 0 14px;">
+  <button class="tabbtn on" id="tb-tok" onclick="showTab('tok')">token agreement</button>
+  <button class="tabbtn" id="tb-par" onclick="showTab('par')">speed vs recall</button>
+</div>
+
+<div id="panel-tok">
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;">
+    <div class="mc"><div class="v">946</div><div class="l">tokens compared</div></div>
+    <div class="mc"><div class="v">682</div><div class="l">plain text (none tag)</div></div>
+    <div class="mc"><div class="v">249</div><div class="l">settings disagree</div></div>
+    <div class="mc"><div class="v">15</div><div class="l">unanimous</div></div>
+  </div>
+  <div id="grid"></div>
+  <div id="legend" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:12px;color:var(--color-text-secondary);"></div>
+</div>
+
+<div id="panel-par" style="display:none;">
+  <div style="display:flex;flex-wrap:wrap;gap:14px;margin:0 0 10px;font-size:12px;color:var(--color-text-secondary);">
+    <span style="display:flex;align-items:center;gap:5px;"><span style="width:11px;height:11px;background:#534AB7;"></span>recommended — low + verify</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#0F6E56;"></span>pareto-optimal</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#888780;"></span>dominated</span>
+    <span style="display:flex;align-items:center;gap:5px;"><span style="width:16px;border-top:2px dashed #B4B2A9;"></span>old NER = 69</span>
+  </div>
+  <div style="position:relative;width:100%;height:340px;">
+    <canvas id="pareto" role="img" aria-label="Speed versus recall. low plus verify at about 9 seconds finds 118 entities; high plus verify at 57 seconds finds 136; medium and high without verify are slower without finding more."></canvas>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+(function(){
+  var COLS=['old','lo·nv','lo·v','med·nv','med·v','hi·nv','hi·v'];
+  var COLOR={An:'red',Ti:'red',Lo:'blue',Or:'blue',NO:'blue',Ar:'blue',Cl:'coral',Kl:'coral',En:'teal',Le:'teal',Pe:'purple',Da:'amber',Pf:'green',Og:'pink',Ma:'gray'};
+  var HUE={red:'226,75,74',blue:'55,138,221',amber:'200,130,25',coral:'216,90,48',teal:'29,158,117',purple:'127,119,221',green:'99,153,34',pink:'212,83,126',gray:'136,135,128'};
+  var FG={red:'#E24B4A',blue:'#378ADD',amber:'#C8821C',coral:'#D85A30',teal:'#1D9E75',purple:'#7F77DD',green:'#639922',pink:'#D4537E',gray:'#888780'};
+  var ROWS=[
+    {c:'consensus — all settings agree (the reliable backbone)',it:[
+      ['Fitislaubvogel',['An','Ti','Ti','Ti','Ti','Ti','Ti']],
+      ['München',['Lo','Or','Or','Or','Or','Or','Or']],
+      ['Wetter',['Cl','Kl','Kl','Kl','Kl','Kl','Kl']],
+      ['Stadler',['Pe','Pe','Pe','Pe','Pe','Pe','Pe']],
+      ['Isar',['NO','Or','Or','Or','Or','Or','Or']],
+      ['1918',['O','Da','Da','Da','Da','Da','Da']]]},
+    {c:'dates and times — low+noverify misses, verify catches',it:[
+      ['Gegen',['O','O','O','Da','Da','O','Da']],
+      ['Abend',['O','O','Da','Da','Da','O','Da']],
+      ['heute',['O','O','O','Da','Da','O','Da']],
+      ['Vormittags',['O','Da','Da','Da','Da','Da','Da']],
+      ['abends',['O','O','O','Da','Da','Da','Da']],
+      ['Morgens',['O','O','O','Da','Da','Da','Da']]]},
+    {c:'scientific names — only the verify passes tag them',it:[
+      ['Certhia',['O','O','Ti','O','Ti','O','Ti']],
+      ['brachydactyla',['O','O','Ti','O','Ti','O','Ti']],
+      ['Hypolais',['O','O','Ti','O','Ti','O','Ti']],
+      ['icterina',['O','O','Ti','O','Ti','O','Ti']]]},
+    {c:'counts glued to a species — verify extends the span',it:[
+      ['vielen',['O','O','O','O','Ti','O','Ti']],
+      ['Exemplaren',['O','Ti','O','O','Ti','O','Ti']],
+      ['5 (Daunenjungen)',['O','O','O','Ti','Ti','O','Ti']],
+      ['3 (Exemplare)',['O','O','O','Ti','Ti','Ti','Ti']]]},
+    {c:'genuine disagreements and errors',it:[
+      ['Brehm',['Pe','O','Ti','O','Pe','O','Pe']],
+      ['Rauchwolken',['O','Ti','Ti','Ti','Kl','Kl','Kl']],
+      ['Gebüsch',['En','Pf','Pf','Pf','Le','Pf','Le']],
+      ['Nationalmuseum',['Ar','Or','Og','Og','Og','Og','Og']],
+      ['Garten (engl.)',['En','Or','Or','Or','Or','Or','Or']],
+      ['Junge',['O','O','O','Ti','Ti','Ti','Ti']]]}
+  ];
+  function cell(code){
+    if(code==='O') return '<td>·</td>';
+    var k=COLOR[code]||'gray';
+    return '<td style="background:rgba('+HUE[k]+',.14);color:'+FG[k]+'">'+code+'</td>';
+  }
+  var h='<table class="tg"><tr><th style="text-align:left">token</th>';
+  COLS.forEach(function(c){h+='<th>'+c+'</th>';});
+  h+='</tr>';
+  ROWS.forEach(function(g){
+    h+='<tr><td class="sec" colspan="8">'+g.c+'</td></tr>';
+    g.it.forEach(function(r){
+      h+='<tr><td class="tok">'+r[0]+'</td>';
+      r[1].forEach(function(code){h+=cell(code);});
+      h+='</tr>';
+    });
+  });
+  h+='</table>';
+  document.getElementById('grid').innerHTML=h;
+
+  var LEG=[['Ti','Tier'],['Or','Ort'],['Da','Datum'],['Kl','Klima'],['Le','Lebensraum'],['Pe','Person'],['Pf','Pflanze'],['Og','Organisation']];
+  var lh='';
+  LEG.forEach(function(p){var k=COLOR[p[0]];lh+='<span style="display:flex;align-items:center;gap:5px;"><span style="width:18px;text-align:center;border-radius:3px;background:rgba('+HUE[k]+',.14);color:'+FG[k]+'">'+p[0]+'</span>'+p[1]+'</span>';});
+  lh+='<span>old codes (An, Lo, Cl, En, NO, Ar) share the same colours</span>';
+  document.getElementById('legend').innerHTML=lh;
+
+  var chartDone=false;
+  window.showTab=function(t){
+    document.getElementById('panel-tok').style.display=(t==='tok')?'block':'none';
+    document.getElementById('panel-par').style.display=(t==='par')?'block':'none';
+    document.getElementById('tb-tok').classList.toggle('on',t==='tok');
+    document.getElementById('tb-par').classList.toggle('on',t==='par');
+    if(t==='par'&&!chartDone){chartDone=true;drawChart();}
+  };
+  function drawChart(){
+    var isDark=matchMedia('(prefers-color-scheme: dark)').matches;
+    var ax=isDark?'#B4B2A9':'#5F5E5A', gr=isDark?'rgba(255,255,255,.10)':'rgba(0,0,0,.08)', lab=isDark?'#D3D1C7':'#2C2C2A';
+    var T='#0F6E56',G='#888780',P='#534AB7';
+    var pts=[
+      {x:5.4,y:96,label:'low+noverify',c:T,s:'circle',r:6,dx:10,dy:18,al:'left'},
+      {x:8.7,y:118,label:'low+verify',c:P,s:'star',r:11,dx:13,dy:-6,al:'left'},
+      {x:23.9,y:110,label:'high+noverify',c:G,s:'circle',r:6,dx:10,dy:18,al:'left'},
+      {x:29.7,y:114,label:'medium+noverify',c:G,s:'circle',r:6,dx:10,dy:-8,al:'left'},
+      {x:56.5,y:136,label:'high+verify',c:T,s:'circle',r:7,dx:-12,dy:-10,al:'right'},
+      {x:66.1,y:132,label:'medium+verify',c:G,s:'circle',r:6,dx:-12,dy:16,al:'right'}];
+    var lp={id:'l',afterDatasetsDraw:function(ch){var x=ch.ctx,m=ch.getDatasetMeta(0);x.save();x.font='500 12px '+getComputedStyle(document.body).fontFamily;x.fillStyle=lab;m.data.forEach(function(p,i){var d=ch.data.datasets[0].data[i];x.textAlign=d.al;x.fillText(d.label,p.x+d.dx,p.y+d.dy);});x.restore();}};
+    new Chart(document.getElementById('pareto'),{type:'scatter',
+      data:{datasets:[
+        {data:pts,parsing:false,pointBackgroundColor:pts.map(p=>p.c),pointBorderColor:pts.map(p=>p.c),pointStyle:pts.map(p=>p.s),pointRadius:pts.map(p=>p.r),pointHoverRadius:pts.map(p=>p.r+2),showLine:false},
+        {type:'line',data:[{x:0,y:69},{x:72,y:69}],borderColor:'#B4B2A9',borderDash:[6,4],borderWidth:1.5,pointRadius:0,showLine:true,fill:false}]},
+      options:{responsive:true,maintainAspectRatio:false,layout:{padding:{top:14,right:18}},
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:function(c){var d=c.raw;return d.label?(d.label+': '+d.x+'s/page, '+d.y+' entities'):'';}}}},
+        scales:{x:{type:'linear',min:0,max:72,title:{display:true,text:'seconds per page (lower is better)',color:ax,font:{size:13}},ticks:{color:ax,callback:v=>v+'s'},grid:{color:gr}},
+          y:{min:60,max:145,title:{display:true,text:'entities found (5 pages, higher is better)',color:ax,font:{size:13}},ticks:{color:ax},grid:{color:gr}}}},
+      plugins:[lp]});
+  }
+})();
+</script>
