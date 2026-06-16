@@ -8,73 +8,119 @@ from typing import Dict, List
 # ---------------------------------------------------------------------------
 # Entity types  (NER stage — historical German ornithologist's journals)
 # ---------------------------------------------------------------------------
+# Hybrid tagset for the Laubmann ornithologist journals.  Two parallel axes:
+#   • TYPE  — the entity class (the BIO label backbone, KG node type)
+#   • SCOPE — how the entity is referenced (EcoCor-style: individual, group,
+#             body/plant part, product, named reference).  Carries the
+#             specimen logic: a feather = Tier/Teil, a dried leaf = Pflanze/Teil,
+#             an egg/clutch = Tier|Pflanze/Produkt.
+# Entity-level attributes (count, scientific_name) live on the index/JSON, not
+# in the token-level BIO export.
 ENTITY_TYPES: Dict[str, str] = {
-    "Animal": (
-        "Tier, Tiergruppe oder Tierart (z. B. Wolf, Forelle, Rinderherde)"
+    "Tier": (
+        "Jedes nicht-menschliche Tier — Vögel, Fische, Säuger, Insekten — ob "
+        "Art/Taxon oder Trivialname (z. B. Schwalbe, Habicht, Raubseeschwalbe, "
+        "Löffelreiher, Graugans, Bekassine, Wasserralle). Auch Tierteile (Feder, "
+        "Flügel, Stoß) und Tierprodukte (Ei, Gelege) → über scope kennzeichnen. "
+        "Ein wissenschaftliches Binomen wird NICHT als eigene Entität annotiert, "
+        "sondern in das Feld scientific_name geschrieben."
     ),
-    "Artefact": (
-        "Menschengemachtes, unbelebtes Artefakt (z. B. Brücke, Mühle, Eisenbahn)"
+    "Pflanze": (
+        "Jede Pflanze, Baum, Strauch, Blume, Gras — als Taxon oder Trivialname "
+        "(z. B. Eiche, Schilf, Fichte, Konifere). Auch Pflanzenteile (Blatt, Ast, "
+        "Knospe) und Pflanzenprodukte (Same, Frucht) → über scope kennzeichnen."
     ),
-    "Environment": (
-        "Biotop/Habitat, natürliche Umgebung, kein Eigenname einer Stadt/Ort "
-        "(z. B. Wald, Uferzone, Auenlandschaft)"
+    "Lebensraum": (
+        "Generischer Lebensraum / Biotop / Habitat OHNE Eigennamen (z. B. Wald, "
+        "Ufer, Sumpf, Fischteich, Wiese, Speicherweiher, Garten, Westufer, Feld). "
+        "Trägt der Ort einen geokodierbaren Eigennamen, gehört er zu Ort."
     ),
-    "Environmental Impact": (
-        "Umweltauswirkung/Effekt (z. B. Überschwemmung, Erosion, Abholzung)"
+    "Material": (
+        "Unbelebtes Natur- oder Werkstoffmaterial, das weder Lebewesen noch "
+        "eigenständiger Lebensraum ist (z. B. Stein, Sand, Wasser als Substanz, "
+        "Erz, Holz als Stoff)."
+    ),
+    "Klima": (
+        "Wetter-, Klima- und atmosphärisches Phänomen (z. B. Wettersturz, Regen, "
+        "Frost, Schnee, Sturm, Sonne, Herbsttag, Nebel)."
     ),
     "Person": (
-        "NUR einzelne, namentlich identifizierbare historische Persönlichkeiten "
-        "mit Eigennamen (z. B. Kaiser Karl IV., Herzog Ernst, Fürst Reuß). "
-        "KEINE Berufsgruppen, Bevölkerungsgruppen, Völker oder generische Bezeichnungen."
+        "Namentlich genannter Mensch — Beobachter, Sammler, Korrespondenten, "
+        "zitierte Autoren (z. B. Dr. Hirt, Dr. Dietz, Adolf Müller, Dr. von Jäckel, "
+        "Hellmayr, Schillinger). Titel/Anrede gehören in den Span. KEINE "
+        "generischen Rollen (Forscher, Jäger, Leute, beide Forscher)."
     ),
-    "Location": (
-        "NUR eindeutig identifizierbare, konkrete geographische Orte mit Eigennamen: "
-        "Länder, Regionen, Städte, Dörfer (z. B. Weimar, Thüringen, Böhmen, Sachsen). "
-        "KEINE abstrakten Gebietsbezeichnungen."
+    "Ort": (
+        "Benannter, geokodierbarer geographischer Ort: Städte, Dörfer, Länder, "
+        "Regionen sowie benannte Gewässer und Berge (z. B. München, Wien, Venedig, "
+        "Ismaning, Bayern, Starnberger See, Inn, Alpen, Karlstein, Rosenheim). "
+        "Eigenname ⇒ Ort; generisches Habitat ⇒ Lebensraum."
     ),
     "Organisation": (
-        "Organisation/Verband/Institution (z. B. Universität Jena, Forstamt Saalfeld, "
-        "Kloster Ettal)"
+        "Benannte Institution, Verein, Behörde oder Sammlung (z. B. "
+        "Tierschutzverein, Universität, Forstamt, zoologische Staatssammlung)."
     ),
-    "Natural Object": (
-        "Natürlich vorkommendes Objekt ohne Veränderung durch menschliches Zutun "
-        "(z. B. Donau, Fichtelgebirge, Lech, Brocken)"
-    ),
-    "Plant": "Pflanze/Pflanzenart (z. B. Eiche, Buche, Weizen)",
-    "Resource": (
-        "Natürlich vorkommende Ressource (z. B. Holz, Erz, Kohle, Quellwasser)"
-    ),
-    "Climate": (
-        "Klima-/Wetter-/Temperatur-Phänomen (z. B. Frost, Dürre, Schneesturm, Regen)"
+    "Datum": (
+        "Datums- und Zeitangabe — Tag, Monat, Jahr, römische Monatszahlen, "
+        "Jahreszeit+Jahr, Uhrzeit (z. B. 28. September 1931, 10. VIII. 1849, "
+        "Herbst 1821, 7. VIII. 31, morgens gegen 5h). Eine bloße Jahreszeit ohne "
+        "Jahr wird NICHT annotiert."
     ),
 }
 
+# Scope axis (parallel BIO column).  Default = Singular when not stated.
+SCOPE_TYPES: Dict[str, str] = {
+    "Singular": (
+        "Einzelexemplar oder bloße Plural-/Verallgemeinerungsnennung (ein Habicht, "
+        "die Schwalben, 7 Gänse, Sonnenschein). Plural ⇒ Singular, nicht Kollektiv."
+    ),
+    "Kollektiv": (
+        "Echte kollektive Einheit, als Gruppe aufgefasst (Schwarm, Rudel, Herde, "
+        "Zug, Tausende von Schwalben, Gebüsch)."
+    ),
+    "Teil": (
+        "Bestandteil einer übergeordneten Entität — Tierteil (Feder, Flügel, Stoß), "
+        "Pflanzenteil (Blatt, Ast), getrocknetes Präparat als Teil."
+    ),
+    "Produkt": (
+        "Abgelöstes Erzeugnis eines Organismus (Ei, Gelege, Same, Frucht)."
+    ),
+    "Referenz": (
+        "Eigenname / direkte Benennung eines spezifischen Einzelwesens "
+        "(benannter oder beringter Vogel, Rasse)."
+    ),
+}
+DEFAULT_SCOPE = "Singular"
+
 # Entity colours and labels for the HTML viewer / GUI
 ENTITY_COLORS: Dict[str, str] = {
-    "Animal":               "#c62828",
-    "Artefact":             "#e65100",
-    "Environment":          "#2e7d32",
-    "Environmental Impact": "#bf360c",
-    "Person":               "#6a1b9a",
-    "Location":             "#1565c0",
-    "Organisation":         "#37474f",
-    "Natural Object":       "#5d4037",
-    "Plant":                "#558b2f",
-    "Resource":             "#f9a825",
-    "Climate":              "#546e7a",
+    "Tier":         "#c62828",
+    "Pflanze":      "#2e7d32",
+    "Lebensraum":   "#00838f",
+    "Material":     "#6d4c41",
+    "Klima":        "#546e7a",
+    "Person":       "#6a1b9a",
+    "Ort":          "#1565c0",
+    "Organisation": "#37474f",
+    "Datum":        "#ef6c00",
 }
 ENTITY_LABELS: Dict[str, str] = {
-    "Animal":               "Tiere",
-    "Artefact":             "Artefakte",
-    "Environment":          "Umgebung",
-    "Environmental Impact": "Umwelteinflüsse",
-    "Person":               "Personen",
-    "Location":             "Orte",
-    "Organisation":         "Organisationen",
-    "Natural Object":       "Naturobjekte",
-    "Plant":                "Pflanzen",
-    "Resource":             "Ressourcen",
-    "Climate":              "Klima",
+    "Tier":         "Tiere",
+    "Pflanze":      "Pflanzen",
+    "Lebensraum":   "Lebensräume",
+    "Material":     "Materialien",
+    "Klima":        "Klima",
+    "Person":       "Personen",
+    "Ort":          "Orte",
+    "Organisation": "Organisationen",
+    "Datum":        "Datum/Zeit",
+}
+SCOPE_LABELS: Dict[str, str] = {
+    "Singular":  "Singular",
+    "Kollektiv": "Kollektiv",
+    "Teil":      "Teil",
+    "Produkt":   "Produkt",
+    "Referenz":  "Referenz",
 }
 
 # ---------------------------------------------------------------------------
@@ -183,8 +229,12 @@ class PipelineConfig:
 
     # NER (Stage 7 – run separately in Colab via Run_NER_Stage.py)
     ner_model_id: str = MODEL_ID
-    ner_thinking_level: str = "low"
+    ner_thinking_level: str = "medium"   # raised from "low" — dense pages under-recall at low
     ner_retries: int = 2
+    ner_verify_pass: bool = True         # cheap second "what did you miss" pass (recall)
+    ner_use_underline_hints: bool = True # feed <u>…</u> spans to the model as candidates
+    ner_include_object_regions: bool = True  # tag specimens in ObjectRegion descriptions
+    ner_include_image_regions: bool = True   # tag content in ImageRegion descriptions
 
     # Pre-rotation (applied before splitting or full-page processing)
     force_rotation: int = 0             # 0, 90, 180, or 270 degrees clockwise
