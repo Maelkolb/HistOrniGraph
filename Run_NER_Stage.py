@@ -1,6 +1,6 @@
 """
 ============================================================
-HistOrniGraph — NER Stage Runner
+HistOrniGraph — NER Stage Runner (Step 3, Colab)
 ============================================================
 Runs Named Entity Recognition on every PAGE-XML page produced by the
 layout + transcription stages and writes annotated copies under
@@ -36,11 +36,17 @@ identical to the originals plus inline ``namedentity {offset; length;
 type;}`` tags on each TextRegion's ``custom`` attribute (Transkribus
 convention) and a denormalised ``<NamedEntities>`` index block under
 ``<Page>``.
+
+The original ``pagexml/`` folder is never modified — re-runs are safe.
+By default already-annotated pages are skipped (set ``SKIP_EXISTING=False``
+to force re-processing).
+============================================================
 """
 
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -116,6 +122,14 @@ NER_VERIFY_PASS     = _resolve_bool("NER_VERIFY_PASS", True)      # cheap 2nd "m
 NER_UNDERLINE_HINTS = _resolve_bool("NER_UNDERLINE_HINTS", True)  # feed <u>…</u> spans
 NER_INCLUDE_OBJECT  = _resolve_bool("NER_INCLUDE_OBJECT", True)   # tag specimen descriptions
 NER_INCLUDE_IMAGE   = _resolve_bool("NER_INCLUDE_IMAGE", True)    # tag picture descriptions
+
+# Concurrency — pages are independent I/O-bound API calls, so a small thread
+# pool cuts wall-clock roughly linearly until you hit the model's rate limit.
+try:
+    NER_WORKERS = int(_resolve("NER_WORKERS", 4))
+except (TypeError, ValueError):
+    NER_WORKERS = 4
+NER_WORKERS = max(1, NER_WORKERS)
 
 # Subdirectory names — change only if your output layout differs
 PAGEXML_SUBDIR     = "pagexml"
@@ -218,10 +232,10 @@ def process_book(client, book_dir: Path) -> dict:
     ok = skipped = errors = total_ents = total_unmatched = 0
     t0 = time.time()
 
-    for idx, page_xml in enumerate(pages, 1):
+    def _work(page_xml: Path) -> dict:
         out_xml = out_dir / page_xml.name
         try:
-            res = annotate_pagexml(
+            return annotate_pagexml(
                 client=client,
                 xml_path=page_xml,
                 out_path=out_xml,
@@ -236,10 +250,11 @@ def process_book(client, book_dir: Path) -> dict:
                 include_image_regions=NER_INCLUDE_IMAGE,
             )
         except Exception as exc:  # noqa: BLE001
-            errors += 1
-            print(f"   [{idx}/{len(pages)}] ✗ {page_xml.stem}: {exc}")
-            continue
+            return {"page": page_xml.stem, "status": "error", "error": str(exc),
+                    "n_entities": 0}
 
+    def _tally(idx: int, res: dict) -> None:
+        nonlocal ok, skipped, errors, total_ents, total_unmatched
         if res["status"] == "skipped":
             skipped += 1
         elif res["status"] in ("ok", "empty"):
@@ -252,7 +267,18 @@ def process_book(client, book_dir: Path) -> dict:
                   f"{res['n_entities']} entit{'y' if res['n_entities'] == 1 else 'ies'}{extra}")
         else:
             errors += 1
-            print(f"   [{idx}/{len(pages)}] ✗ {res['page']}: {res['status']}")
+            print(f"   [{idx}/{len(pages)}] ✗ {res.get('page', '?')}: "
+                  f"{res.get('error', res['status'])}")
+
+    if NER_WORKERS <= 1:
+        for idx, page_xml in enumerate(pages, 1):
+            _tally(idx, _work(page_xml))
+    else:
+        print(f"   (running {NER_WORKERS} pages concurrently)")
+        with ThreadPoolExecutor(max_workers=NER_WORKERS) as ex:
+            futs = {ex.submit(_work, p): p for p in pages}
+            for done, fut in enumerate(as_completed(futs), 1):
+                _tally(done, fut.result())
 
     elapsed = time.time() - t0
     print(f"   → done in {elapsed:.1f}s   "
@@ -270,6 +296,7 @@ def main() -> None:
     print(f"   Thinking: {NER_THINKING_LEVEL}")
     print(f"   Verify pass: {NER_VERIFY_PASS}   Underline hints: {NER_UNDERLINE_HINTS}")
     print(f"   Include object/image descriptions: {NER_INCLUDE_OBJECT}/{NER_INCLUDE_IMAGE}")
+    print(f"   Workers: {NER_WORKERS}")
     print(f"   Skip existing: {SKIP_EXISTING}")
     print()
 
