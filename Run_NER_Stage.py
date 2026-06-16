@@ -96,7 +96,7 @@ NER_MODEL_ID       = _resolve("NER_MODEL_ID_OVERRIDE",       "") or _resolve(
     "NER_MODEL_ID", "gemini-3-flash-preview"
 )
 NER_THINKING_LEVEL = _resolve("NER_THINKING_LEVEL_OVERRIDE", "") or _resolve(
-    "NER_THINKING_LEVEL", "low"
+    "NER_THINKING_LEVEL", "medium"
 )
 
 # Skip pages whose annotated XML already exists in pagexml_ner/
@@ -105,6 +105,22 @@ if _skip_raw is None:
     _skip_raw = _resolve("SKIP_EXISTING", True)
 SKIP_EXISTING = _skip_raw if isinstance(_skip_raw, bool) else \
     str(_skip_raw).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _resolve_bool(name: str, default: bool) -> bool:
+    raw = _resolve(f"{name}_OVERRIDE", None)
+    if raw is None:
+        raw = _resolve(name, default)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+# Recall / coverage behaviour (all default ON — see config.py rationale)
+NER_VERIFY_PASS     = _resolve_bool("NER_VERIFY_PASS", True)      # cheap 2nd "missed?" pass
+NER_UNDERLINE_HINTS = _resolve_bool("NER_UNDERLINE_HINTS", True)  # feed <u>…</u> spans
+NER_INCLUDE_OBJECT  = _resolve_bool("NER_INCLUDE_OBJECT", True)   # tag specimen descriptions
+NER_INCLUDE_IMAGE   = _resolve_bool("NER_INCLUDE_IMAGE", True)    # tag picture descriptions
 
 # Subdirectory names — change only if your output layout differs
 PAGEXML_SUBDIR     = "pagexml"
@@ -191,7 +207,7 @@ def process_book(client, book_dir: Path) -> dict:
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
 
-    from journal_processor.config import ENTITY_TYPES
+    from journal_processor.config import ENTITY_TYPES, SCOPE_TYPES
     from journal_processor.ner_stage import annotate_pagexml
 
     src_dir = book_dir / PAGEXML_SUBDIR
@@ -204,7 +220,7 @@ def process_book(client, book_dir: Path) -> dict:
         return {"book": book_dir.name, "pages": 0, "ok": 0, "skipped": 0,
                 "errors": 0, "total_entities": 0}
 
-    ok = skipped = errors = total_ents = 0
+    ok = skipped = errors = total_ents = total_unmatched = 0
     t0 = time.time()
 
     for idx, page_xml in enumerate(pages, 1):
@@ -216,8 +232,13 @@ def process_book(client, book_dir: Path) -> dict:
                 out_path=out_xml,
                 entity_types=ENTITY_TYPES,
                 model_id=NER_MODEL_ID,
+                scope_types=SCOPE_TYPES,
                 thinking_level=NER_THINKING_LEVEL,
                 skip_existing=SKIP_EXISTING,
+                verify_pass=NER_VERIFY_PASS,
+                use_underline_hints=NER_UNDERLINE_HINTS,
+                include_object_regions=NER_INCLUDE_OBJECT,
+                include_image_regions=NER_INCLUDE_IMAGE,
             )
         except Exception as exc:  # noqa: BLE001
             errors += 1
@@ -229,24 +250,31 @@ def process_book(client, book_dir: Path) -> dict:
         elif res["status"] in ("ok", "empty"):
             ok += 1
             total_ents += max(0, res["n_entities"])
+            n_unm = res.get("n_unmatched", 0)
+            total_unmatched += n_unm
+            extra = f"  ({n_unm} unlocated)" if n_unm else ""
             print(f"   [{idx}/{len(pages)}] ✓ {res['page']}: "
-                  f"{res['n_entities']} entit{'y' if res['n_entities'] == 1 else 'ies'}")
+                  f"{res['n_entities']} entit{'y' if res['n_entities'] == 1 else 'ies'}{extra}")
         else:
             errors += 1
             print(f"   [{idx}/{len(pages)}] ✗ {res['page']}: {res['status']}")
 
     elapsed = time.time() - t0
     print(f"   → done in {elapsed:.1f}s   "
-          f"ok={ok}  skipped={skipped}  errors={errors}  entities={total_ents}")
+          f"ok={ok}  skipped={skipped}  errors={errors}  "
+          f"entities={total_ents}  unlocated={total_unmatched}")
     return {"book": book_dir.name, "pages": len(pages),
             "ok": ok, "skipped": skipped, "errors": errors,
-            "total_entities": total_ents, "elapsed_s": round(elapsed, 1)}
+            "total_entities": total_ents, "unmatched": total_unmatched,
+            "elapsed_s": round(elapsed, 1)}
 
 
 def main() -> None:
     print("🔬 HistOrniGraph — NER Stage Runner")
     print(f"   Model:    {NER_MODEL_ID}")
     print(f"   Thinking: {NER_THINKING_LEVEL}")
+    print(f"   Verify pass: {NER_VERIFY_PASS}   Underline hints: {NER_UNDERLINE_HINTS}")
+    print(f"   Include object/image descriptions: {NER_INCLUDE_OBJECT}/{NER_INCLUDE_IMAGE}")
     print(f"   Skip existing: {SKIP_EXISTING}")
     print()
 
