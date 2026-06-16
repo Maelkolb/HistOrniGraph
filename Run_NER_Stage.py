@@ -1,6 +1,6 @@
 """
 ============================================================
-HistOrniGraph — NER Stage Runner (Step 3, Colab)
+HistOrniGraph — NER Stage Runner
 ============================================================
 Runs Named Entity Recognition on every PAGE-XML page produced by the
 layout + transcription stages and writes annotated copies under
@@ -36,11 +36,6 @@ identical to the originals plus inline ``namedentity {offset; length;
 type;}`` tags on each TextRegion's ``custom`` attribute (Transkribus
 convention) and a denormalised ``<NamedEntities>`` index block under
 ``<Page>``.
-
-The original ``pagexml/`` folder is never modified — re-runs are safe.
-By default already-annotated pages are skipped (set ``SKIP_EXISTING=False``
-to force re-processing).
-============================================================
 """
 
 import os
