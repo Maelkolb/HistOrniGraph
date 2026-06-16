@@ -71,13 +71,19 @@ def generate_pagexml(
         SubElement(region_el, "Coords", points=_coords_str(bbox))
 
         # Transcription
-        text = r.get("transcription", {}).get("text", "")
-        if text and xml_tag == "TextRegion":
-            te = SubElement(region_el, "TextEquiv")
-            SubElement(te, "Unicode").text = text
-        elif text and xml_tag == "TableRegion":
-            te = SubElement(region_el, "TextEquiv")
-            SubElement(te, "Unicode").text = text
+        tr_data = r.get("transcription", {}) or {}
+        text = tr_data.get("text", "")
+        if xml_tag in ("TextRegion", "TableRegion"):
+            if text:
+                te = SubElement(region_el, "TextEquiv")
+                SubElement(te, "Unicode").text = text
+        elif xml_tag in ("ImageRegion", "GraphicRegion"):
+            # Image / object regions carry a description, not running text.
+            # Surface it as Unicode so the NER stage and viewer can use it.
+            desc = tr_data.get("description") or ""
+            if desc:
+                te = SubElement(region_el, "TextEquiv")
+                SubElement(te, "Unicode").text = desc
 
     xml_str = tostring(root, encoding="unicode")
     pretty = minidom.parseString(xml_str).toprettyxml(indent="  ", encoding=None)
