@@ -94,30 +94,26 @@ AUTO_SHARE_PAGES_FOLDER = True
 # ── Named-Entity tag set (mirror of journal_processor/config.py) ──────────
 # Kept here verbatim so this script stays standalone (Colab cell paste-friendly).
 ENTITY_COLORS = {
-    "Animal":               "#c62828",
-    "Artefact":             "#e65100",
-    "Environment":          "#2e7d32",
-    "Environmental Impact": "#bf360c",
-    "Person":               "#6a1b9a",
-    "Location":             "#1565c0",
-    "Organisation":         "#37474f",
-    "Natural Object":       "#5d4037",
-    "Plant":                "#558b2f",
-    "Resource":             "#f9a825",
-    "Climate":              "#546e7a",
+    "Tier":         "#c62828",
+    "Pflanze":      "#2e7d32",
+    "Lebensraum":   "#00838f",
+    "Material":     "#6d4c41",
+    "Klima":        "#546e7a",
+    "Person":       "#6a1b9a",
+    "Ort":          "#1565c0",
+    "Organisation": "#37474f",
+    "Datum":        "#ef6c00",
 }
 ENTITY_LABELS = {
-    "Animal":               "Tiere",
-    "Artefact":             "Artefakte",
-    "Environment":          "Umgebung",
-    "Environmental Impact": "Umwelteinflüsse",
-    "Person":               "Personen",
-    "Location":             "Orte",
-    "Organisation":         "Organisationen",
-    "Natural Object":       "Naturobjekte",
-    "Plant":                "Pflanzen",
-    "Resource":             "Ressourcen",
-    "Climate":              "Klima",
+    "Tier":         "Tiere",
+    "Pflanze":      "Pflanzen",
+    "Lebensraum":   "Lebensräume",
+    "Material":     "Materialien",
+    "Klima":        "Klima",
+    "Person":       "Personen",
+    "Ort":          "Orte",
+    "Organisation": "Organisationen",
+    "Datum":        "Datum/Zeit",
 }
 
 
@@ -530,19 +526,21 @@ def parse_pagexml(xml_path):
         rid    = ent.get("regionRef", "")
         offset = _to_int(ent.get("offset"))
         length = _to_int(ent.get("length"))
-        text   = ""
-        if rid and offset is not None and length is not None:
+        text   = ent.get("text", "")  # clean surface form written by ner_stage
+        if not text and rid and offset is not None and length is not None:
             src = region_text_by_id.get(rid, "")
             if 0 <= offset < len(src) and length > 0:
                 text = src[offset:offset + length]
-        if not text:
-            text = ent.get("text", "")  # legacy fallback
         entities.append({
             "text":      text,
             "type":      ent.get("type", ""),
+            "scope":     ent.get("scope", ""),
             "regionRef": rid,
+            "regionType": ent.get("regionType", ""),
             "offset":    offset if offset is not None else -1,
             "length":    length if length is not None else -1,
+            "count":     ent.get("count", ""),
+            "scientificName": ent.get("scientificName", ""),
             "context":   ent.get("context", ""),
         })
 
@@ -2355,9 +2353,13 @@ function applyEntityHighlights() {
       span.className = 'entity';
       var color = ENTITY_COLORS[ent.entity_type || ent.type] || '#666';
       span.style.color = color;
-      span.title = (ENTITY_LABELS[ent.entity_type || ent.type]
-                    || ent.entity_type || ent.type || '')
-                   + (ent.context ? '  —  ' + ent.context : '');
+      var tip = (ENTITY_LABELS[ent.entity_type || ent.type]
+                 || ent.entity_type || ent.type || '');
+      if (ent.scope) { tip += ' · ' + ent.scope; }
+      if (ent.count) { tip += ' · n=' + ent.count; }
+      if (ent.scientificName) { tip += ' · ' + ent.scientificName; }
+      if (ent.context) { tip += '  —  ' + ent.context; }
+      span.title = tip;
       span.textContent = matchText;
       frag.appendChild(span);
       lastIdx = globalRx.lastIndex;
