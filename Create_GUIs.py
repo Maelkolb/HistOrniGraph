@@ -1272,7 +1272,7 @@ def generate_html(data):
     color: inherit;
   }
 
-  /* HISTORNI_SCOPE_PATCH_V1 — visible scope badge */
+  /* HISTORNI_SCOPE_PATCH — visible scope badge */
   .entity-scope {
     font-size: 8px;
     font-weight: 700;
@@ -2297,12 +2297,14 @@ function escRegex(s) {
 }
 
 /**
- * HISTORNI_SCOPE_PATCH_V1 — segment-aware entity highlighter.
- * Concatenates each block's text so entities split across inline tags
- * (<u>…-</u><u>…</u> hyphenation, 4<sup>h</sup> superscripts) are matched,
- * de-hyphenates line-break splits, then maps hits back to DOM nodes and
- * wraps each slice. Mirrors the offset-based BIO / PAGE-XML spans.
- * Non-Singular scope is shown as a superscript badge (K/T/P/R); full
+ * HISTORNI_SCOPE_PATCH_V2 — hyphenation-aware entity highlighter.
+ * renderMarkdown() wraps each source line in its own <p>, so a word split
+ * across a line break (<u>Lach-</u> in one <p>, <u>möwen</u> in the next)
+ * spans two blocks. This collects blocks, CHAINS consecutive blocks whose
+ * predecessor ends in a soft hyphen, drops that hyphen, and matches across
+ * the join — so cut-off entities highlight like any other. Also folds inline
+ * splits (4<sup>h</sup>) within a block, then maps hits back onto the real DOM
+ * nodes. Non-Singular scope shows as a superscript badge (K/T/P/R); full
  * type · scope · count · sci · context stays on hover.
  */
 function applyEntityHighlights() {
@@ -2323,9 +2325,8 @@ function applyEntityHighlights() {
   var BLOCK = {P:1,H1:1,H2:1,H3:1,H4:1,H5:1,H6:1,LI:1,BLOCKQUOTE:1,
                TD:1,TH:1,TR:1,TABLE:1,UL:1,OL:1,DIV:1,HR:1,PRE:1};
 
-  // Split the preview into block-level segments; inline tags stay inside a
-  // segment so cross-tag entities can still be matched, code/pre is skipped.
-  var segs = [];
+  // Ordered list of blocks; each block = array of its text nodes (code/pre skipped).
+  var blocks = [];
   (function collect(root){
     function walk(el){
       var cur = [];
@@ -2334,50 +2335,86 @@ function applyEntityHighlights() {
         if (c.nodeType !== 1) continue;
         var tag = c.tagName;
         if (tag === 'CODE' || tag === 'PRE') continue;
-        if (BLOCK[tag]){
-          if (cur.length){ segs.push(cur); cur = []; }
-          walk(c);
-        } else {
+        if (BLOCK[tag]){ if (cur.length){ blocks.push(cur); cur = []; } walk(c); }
+        else {
           (function inl(n){
             for (var d = n.firstChild; d; d = d.nextSibling){
               if (d.nodeType === 3){ cur.push(d); }
               else if (d.nodeType === 1 && d.tagName !== 'CODE' && d.tagName !== 'PRE'){
-                if (BLOCK[d.tagName]){ if (cur.length){ segs.push(cur); cur = []; } walk(d); }
+                if (BLOCK[d.tagName]){ if (cur.length){ blocks.push(cur); cur = []; } walk(d); }
                 else inl(d);
               }
             }
           })(c);
         }
       }
-      if (cur.length) segs.push(cur);
+      if (cur.length) blocks.push(cur);
     }
     walk(root);
   })(markdownPreview);
+  if (!blocks.length) return;
 
-  segs.forEach(function(nodes){
-    // Concatenated text S + per-char map back to [node, localOffset].
-    var S = '', map = [];
-    nodes.forEach(function(nd){
-      var v = nd.nodeValue || '';
-      for (var k = 0; k < v.length; k++) map.push([nd, k]);
-      S += v;
+  var bText = blocks.map(function(nodes){
+    var t = ''; nodes.forEach(function(nd){ t += (nd.nodeValue || ''); }); return t;
+  });
+  // Drop whitespace-only blocks (the inter-<p> "\n" text nodes renderMarkdown
+  // leaves between lines) so hyphenation chains stay contiguous.
+  var rb = [], rt = [];
+  for (var bk = 0; bk < blocks.length; bk++){
+    if (bText[bk].replace(/\s+/g, '') !== ''){ rb.push(blocks[bk]); rt.push(bText[bk]); }
+  }
+  blocks = rb; bText = rt;
+  if (!blocks.length) return;
+
+  function softHyphenEnd(t){
+    var s = t.replace(/\s+$/, '');
+    return s.length > 0 && s.charAt(s.length - 1) === '-';
+  }
+
+  // Group consecutive blocks joined by line-break hyphenation into chains.
+  var chains = [], bi = 0;
+  while (bi < blocks.length){
+    var chain = [bi];
+    while (softHyphenEnd(bText[chain[chain.length - 1]]) &&
+           chain[chain.length - 1] + 1 < blocks.length){
+      chain.push(chain[chain.length - 1] + 1);
+    }
+    chains.push(chain);
+    bi = chain[chain.length - 1] + 1;
+  }
+
+  chains.forEach(function(chain){
+    // Concatenate the chain's nodes -> S + per-char map; record block ends.
+    var S = '', map = [], drop = {}, blockEnd = [];
+    chain.forEach(function(bIdx){
+      blocks[bIdx].forEach(function(nd){
+        var v = nd.nodeValue || '';
+        for (var x = 0; x < v.length; x++){ S += v.charAt(x); map.push([nd, x]); }
+      });
+      blockEnd.push(S.length);
     });
     if (!S) return;
 
-    // Normalised text N (drop line-break hyphenation) + index map N->S.
+    // Mark the trailing soft hyphen of every non-final block in the chain.
+    for (var ci = 0; ci < chain.length - 1; ci++){
+      var ep = blockEnd[ci] - 1;
+      while (ep >= 0 && /\s/.test(S.charAt(ep))) ep--;
+      if (ep >= 0 && S.charAt(ep) === '-') drop[ep] = true;
+    }
+
+    // N = S minus dropped hyphens (+ legacy '-' immediately before a newline).
     var N = '', n2o = [];
-    for (var i = 0; i < S.length;){
-      if (S[i] === '-'){
+    for (var i = 0; i < S.length; i++){
+      if (drop[i]) continue;
+      if (S.charAt(i) === '-'){
         var j = i + 1;
-        while (j < S.length && (S[j] === ' ' || S[j] === '\t')) j++;
-        if (j < S.length && (S[j] === '\n' || S[j] === '\r')){
-          var mm = j;
-          while (mm < S.length && /\s/.test(S[mm])) mm++;
-          i = mm;            // skip hyphen + trailing whitespace -> join halves
-          continue;
+        while (j < S.length && (S.charAt(j) === ' ' || S.charAt(j) === '\t')) j++;
+        if (j < S.length && (S.charAt(j) === '\n' || S.charAt(j) === '\r')){
+          var mm = j; while (mm < S.length && /\s/.test(S.charAt(mm))) mm++;
+          i = mm - 1; continue;
         }
       }
-      N += S[i]; n2o.push(i); i++;
+      N += S.charAt(i); n2o.push(i);
     }
     if (!N) return;
 
