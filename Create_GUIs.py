@@ -1271,6 +1271,21 @@ def generate_html(data):
     background-color: color-mix(in srgb, currentColor 14%, transparent);
     color: inherit;
   }
+
+  /* HISTORNI_SCOPE_PATCH_V1 — visible scope badge */
+  .entity-scope {
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 1;
+    margin-left: 1px;
+    padding: 0 2px;
+    border-radius: 2px;
+    vertical-align: super;
+    background: color-mix(in srgb, currentColor 22%, transparent);
+    color: currentColor;
+    opacity: 0.85;
+    cursor: default;
+  }
   .entity-tag {
     display: inline-block;
     margin-left: 4px;
@@ -2282,98 +2297,151 @@ function escRegex(s) {
 }
 
 /**
- * Walk text nodes inside the markdown preview and wrap occurrences of
- * entity texts in <span class="entity"> tags. Longest entities are
- * matched first so "grauen Fliegenschnäpper" beats "Fliegenschnäpper"
- * to a shared span. Skips text already inside .entity / <code> / <pre>.
+ * HISTORNI_SCOPE_PATCH_V1 — segment-aware entity highlighter.
+ * Concatenates each block's text so entities split across inline tags
+ * (<u>…-</u><u>…</u> hyphenation, 4<sup>h</sup> superscripts) are matched,
+ * de-hyphenates line-break splits, then maps hits back to DOM nodes and
+ * wraps each slice. Mirrors the offset-based BIO / PAGE-XML spans.
+ * Non-Singular scope is shown as a superscript badge (K/T/P/R); full
+ * type · scope · count · sci · context stays on hover.
  */
 function applyEntityHighlights() {
   if (!showEntities) return;
   var entities = currentPageEntities();
   if (!entities.length) return;
 
-  // Sort longest-first to handle overlapping/nested entity texts deterministically.
-  var sorted = entities.slice().sort(function(a, b) {
-    return (b.text || '').length - (a.text || '').length;
-  });
+  var sorted = entities.slice()
+    .filter(function(e){ return e && e.text; })
+    .sort(function(a, b){ return (b.text || '').length - (a.text || '').length; });
+  if (!sorted.length) return;
 
-  // Combined regex (case-sensitive — the NER prompt requires exact-case matches).
-  var pattern = sorted
-    .filter(function(e) { return e && e.text; })
-    .map(function(e) { return escRegex(e.text); })
-    .join('|');
-  if (!pattern) return;
-  var rx = new RegExp(pattern);
-
-  // Build a quick lookup: text → entity (longest already wins via sort order).
   var byText = {};
-  sorted.forEach(function(e) {
-    if (e && e.text && byText[e.text] === undefined) byText[e.text] = e;
-  });
+  sorted.forEach(function(e){ if (byText[e.text] === undefined) byText[e.text] = e; });
+  var pattern = sorted.map(function(e){ return escRegex(e.text); }).join('|');
+  if (!pattern) return;
 
-  function shouldSkip(node) {
-    var p = node.parentNode;
-    while (p && p !== markdownPreview) {
-      if (p.nodeType === 1) {
-        var tag = p.tagName;
-        if (tag === 'CODE' || tag === 'PRE') return true;
-        if (p.classList && p.classList.contains('entity')) return true;
+  var BLOCK = {P:1,H1:1,H2:1,H3:1,H4:1,H5:1,H6:1,LI:1,BLOCKQUOTE:1,
+               TD:1,TH:1,TR:1,TABLE:1,UL:1,OL:1,DIV:1,HR:1,PRE:1};
+
+  // Split the preview into block-level segments; inline tags stay inside a
+  // segment so cross-tag entities can still be matched, code/pre is skipped.
+  var segs = [];
+  (function collect(root){
+    function walk(el){
+      var cur = [];
+      for (var c = el.firstChild; c; c = c.nextSibling){
+        if (c.nodeType === 3){ cur.push(c); continue; }
+        if (c.nodeType !== 1) continue;
+        var tag = c.tagName;
+        if (tag === 'CODE' || tag === 'PRE') continue;
+        if (BLOCK[tag]){
+          if (cur.length){ segs.push(cur); cur = []; }
+          walk(c);
+        } else {
+          (function inl(n){
+            for (var d = n.firstChild; d; d = d.nextSibling){
+              if (d.nodeType === 3){ cur.push(d); }
+              else if (d.nodeType === 1 && d.tagName !== 'CODE' && d.tagName !== 'PRE'){
+                if (BLOCK[d.tagName]){ if (cur.length){ segs.push(cur); cur = []; } walk(d); }
+                else inl(d);
+              }
+            }
+          })(c);
+        }
       }
-      p = p.parentNode;
+      if (cur.length) segs.push(cur);
     }
-    return false;
-  }
+    walk(root);
+  })(markdownPreview);
 
-  // Collect text nodes first — modifying the tree mid-walk is fragile.
-  var walker = document.createTreeWalker(markdownPreview, NodeFilter.SHOW_TEXT, null);
-  var nodes = [];
-  var n;
-  while ((n = walker.nextNode())) nodes.push(n);
+  segs.forEach(function(nodes){
+    // Concatenated text S + per-char map back to [node, localOffset].
+    var S = '', map = [];
+    nodes.forEach(function(nd){
+      var v = nd.nodeValue || '';
+      for (var k = 0; k < v.length; k++) map.push([nd, k]);
+      S += v;
+    });
+    if (!S) return;
 
-  nodes.forEach(function(node) {
-    if (!node.nodeValue || shouldSkip(node)) return;
-    var txt = node.nodeValue;
-    if (!rx.test(txt)) return;
+    // Normalised text N (drop line-break hyphenation) + index map N->S.
+    var N = '', n2o = [];
+    for (var i = 0; i < S.length;){
+      if (S[i] === '-'){
+        var j = i + 1;
+        while (j < S.length && (S[j] === ' ' || S[j] === '\t')) j++;
+        if (j < S.length && (S[j] === '\n' || S[j] === '\r')){
+          var mm = j;
+          while (mm < S.length && /\s/.test(S[mm])) mm++;
+          i = mm;            // skip hyphen + trailing whitespace -> join halves
+          continue;
+        }
+      }
+      N += S[i]; n2o.push(i); i++;
+    }
+    if (!N) return;
 
-    var frag = document.createDocumentFragment();
-    var lastIdx = 0;
-    var globalRx = new RegExp(pattern, 'g');
+    var rx = new RegExp(pattern, 'g');
+    var consumed = new Array(S.length);
+    var opsByNode = new Map();
     var m;
-    while ((m = globalRx.exec(txt)) !== null) {
+    while ((m = rx.exec(N)) !== null){
       var matchText = m[0];
+      if (m.index === rx.lastIndex) rx.lastIndex++;
       var ent = byText[matchText];
-      if (!ent) { lastIdx = globalRx.lastIndex; continue; }
+      if (!ent) continue;
+      var sStart = n2o[m.index];
+      var sEnd   = n2o[m.index + matchText.length - 1] + 1;
+      var clash = false;
+      for (var p = sStart; p < sEnd; p++){ if (consumed[p]){ clash = true; break; } }
+      if (clash) continue;
+      for (var q = sStart; q < sEnd; q++) consumed[q] = true;
 
-      // Push leading text
-      if (m.index > lastIdx) {
-        frag.appendChild(document.createTextNode(txt.slice(lastIdx, m.index)));
+      var slices = [], p2 = sStart;
+      while (p2 < sEnd){
+        var nd = map[p2][0], lo = map[p2][1], hi = lo, p3 = p2;
+        while (p3 < sEnd && map[p3][0] === nd){ hi = map[p3][1] + 1; p3++; }
+        slices.push([nd, lo, hi]);
+        p2 = p3;
       }
-      // Build span
-      var span = document.createElement('span');
-      span.className = 'entity';
-      var color = ENTITY_COLORS[ent.entity_type || ent.type] || '#666';
-      span.style.color = color;
-      var tip = (ENTITY_LABELS[ent.entity_type || ent.type]
-                 || ent.entity_type || ent.type || '');
-      if (ent.scope) { tip += ' · ' + ent.scope; }
-      if (ent.count) { tip += ' · n=' + ent.count; }
-      if (ent.scientificName) { tip += ' · ' + ent.scientificName; }
-      if (ent.context) { tip += '  —  ' + ent.context; }
-      span.title = tip;
-      span.textContent = matchText;
-      frag.appendChild(span);
-      lastIdx = globalRx.lastIndex;
+      slices.forEach(function(sl, idx){
+        if (!opsByNode.has(sl[0])) opsByNode.set(sl[0], []);
+        opsByNode.get(sl[0]).push({start: sl[1], end: sl[2], ent: ent,
+                                   last: idx === slices.length - 1});
+      });
+    }
 
-      // Guard against zero-width matches
-      if (m.index === globalRx.lastIndex) globalRx.lastIndex++;
-    }
-    // Trailing text
-    if (lastIdx < txt.length) {
-      frag.appendChild(document.createTextNode(txt.slice(lastIdx)));
-    }
-    node.parentNode.replaceChild(frag, node);
+    // Apply wraps per node, right-to-left so earlier offsets stay valid.
+    opsByNode.forEach(function(ops, node){
+      ops.sort(function(a, b){ return b.start - a.start; });
+      ops.forEach(function(op){
+        node.splitText(op.end);
+        var mid = node.splitText(op.start);   // mid = [start, end)
+        var span = document.createElement('span');
+        span.className = 'entity';
+        var ent = op.ent;
+        span.style.color = ENTITY_COLORS[ent.entity_type || ent.type] || '#666';
+        var tip = (ENTITY_LABELS[ent.entity_type || ent.type] || ent.entity_type || ent.type || '');
+        if (ent.scope) tip += ' \u00b7 ' + ent.scope;
+        if (ent.count) tip += ' \u00b7 n=' + ent.count;
+        if (ent.scientificName) tip += ' \u00b7 ' + ent.scientificName;
+        if (ent.context) tip += '  \u2014  ' + ent.context;
+        span.title = tip;
+        mid.parentNode.replaceChild(span, mid);
+        span.appendChild(mid);
+        if (op.last && ent.scope && ent.scope !== 'Singular'){
+          var badge = document.createElement('sup');
+          badge.className = 'entity-scope scope-' + ent.scope;
+          badge.textContent = ({Kollektiv:'K', Teil:'T', Produkt:'P', Referenz:'R'})[ent.scope]
+                              || ent.scope.charAt(0);
+          badge.title = ent.scope;
+          span.appendChild(badge);
+        }
+      });
+    });
   });
 }
+
 
 /**
  * Rebuild the entity legend strip above the editor tabs.  One chip per
