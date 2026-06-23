@@ -63,21 +63,31 @@ _MONTH_NAME = (
     r"Jun[i]?|Jul[i]?|Aug(?:ust|\.)?|Sept?(?:ember|\.)?|Okt(?:ober|\.)?|"
     r"Nov(?:ember|\.)?|Dez(?:ember|\.)?"
 )
+# Laubmann (or the transcriber) sometimes used English/Latin month spellings,
+# e.g. "29. October 1934", "28. December 1935".
+_MONTH_EN = (
+    r"January|February|March|May|June|July|"
+    r"September|October|November|December|"
+    r"Oct\.?|Nov\.?|Dec\.?|Sept?\.?"
+)
 _MONTH_ROMAN = r"VIII|XII|VII|III|XI|IX|IV|VI|II|X|V|I"
-_MONTH = rf"(?:{_MONTH_NAME}|(?:{_MONTH_ROMAN})\.?)"
-_DAY   = r"\d{1,2}\."
+_MONTH = rf"(?:{_MONTH_NAME}|{_MONTH_EN}|(?:{_MONTH_ROMAN})\.?)"
+_DAY   = r"\d{1,2}\.?"
 _YEAR  = r"(?:1[5-9]\d{2}|20\d{2}|\d{2})"
 # Date with a required year (strict).  ``[\s.]*`` lets a stray period sit between
 # month and year, e.g. "21. August. 1917".
 _DATEY = rf"{_DAY}\s*{_MONTH}[\s.]*{_YEAR}"
 # Date with an optional year (used only with --loose; lower precision).
 _DATE  = rf"{_DAY}\s*{_MONTH}[\s.]*(?:{_YEAR})?"
+# A header line may be prefixed with a list bullet ("- 22. April 1938 …") because
+# the transcriber rendered some entry starts as ListRegion items.
+_BULLET = r"(?:[-*\u2022]\s*)?"
 
 
 def _header_re(year_required: bool) -> "re.Pattern":
     date = _DATEY if year_required else _DATE
     return re.compile(
-        rf"^[ \t]*(?:<u>[ \t]*)?(?P<date>(?i:{date}))[ \t]*(?:</u>)?[ \t]*"
+        rf"^[ \t]*{_BULLET}(?:<u>[ \t]*)?(?P<date>(?i:{date}))[ \t]*(?:</u>)?[ \t]*"
         rf"[.:]?(?P<rest>[^\n]*)$",
         re.MULTILINE,
     )
@@ -99,11 +109,13 @@ _DATE_PARSE = re.compile(
 
 _ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6,
           "vii": 7, "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12}
-_MNAME = {"jan": 1, "jän": 1, "feb": 2, "mar": 3, "mär": 3, "apr": 4, "mai": 5,
-          "jun": 6, "jul": 7, "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dez": 12}
+_MNAME = {"jan": 1, "jän": 1, "feb": 2, "mar": 3, "mär": 3, "apr": 4,
+          "mai": 5, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9,
+          "okt": 10, "oct": 10, "nov": 11, "dez": 12, "dec": 12}
 
-_MARKUP_RE = re.compile(r"</?(?:u|sup|sub|b|i|em|strong)\s*>", re.IGNORECASE)
-_WS_RE     = re.compile(r"[ \t]*\n[ \t]*")
+_MARKUP_RE   = re.compile(r"</?(?:u|sup|sub|b|i|em|strong)\s*>", re.IGNORECASE)
+_DEHYPHEN_RE = re.compile(r"(\w)-[ \t]*\n+[ \t]*([a-zäöüß])")
+_WS_RE       = re.compile(r"\s*\n+\s*")
 
 
 def _month_to_num(raw: str) -> Optional[int]:
@@ -181,7 +193,10 @@ def find_entry_starts(text: str, loose: bool = False) -> List[Dict[str, Any]]:
 
 
 def strip_markup(text: str) -> str:
-    return _WS_RE.sub(" ", _MARKUP_RE.sub("", text)).strip()
+    t = _MARKUP_RE.sub("", text)
+    t = _DEHYPHEN_RE.sub(r"\1\2", t)          # join words split across line breaks
+    t = _WS_RE.sub(" ", t)
+    return re.sub(r"[ \t]{2,}", " ", t).strip()
 
 
 # ── Page-id parsing / sorting ────────────────────────────────────────────────
@@ -353,8 +368,24 @@ def segment_entries(vol_num: int, pages: List[Dict[str, Any]],
 
 # ── Markdown rendering ───────────────────────────────────────────────────────
 
+# Escape a leading "12." so Markdown viewers don't turn date lines into an
+# ordered list (cosmetic; only affects corpus.md, not the data artifacts).
+_MD_LIST_RE = re.compile(r"(?m)^([ \t]*)(\d{1,2})\.(?=\s)")
+
+
+def _md_safe(text: str) -> str:
+    return _MD_LIST_RE.sub(r"\1\2\\.", text)
+
+
+def _entry_label(h: Dict[str, Any]) -> str:
+    loc = f" · {h['location']}" if h["location"] else ""
+    tag = f" `{h['date_norm']}`" if h.get("date_norm") else ""
+    return f"{h['date']}{loc}{tag}"
+
+
 def render_volume_md(vol_num: int, pages: List[Dict[str, Any]], loose: bool) -> str:
     out: List[str] = [f"# Laubmann · Vol. {vol_num:02d}", ""]
+    last_entry: Optional[Dict[str, Any]] = None     # running entry across pages
     for page in pages:
         pid, scan, pnum = page["page_id"], page["scan"], page["page_number"]
         head = f"## Vol. {vol_num:02d} · scan {scan:04d}"
@@ -377,17 +408,20 @@ def render_volume_md(vol_num: int, pages: List[Dict[str, Any]], loose: bool) -> 
                 f"crop={reg['crop']} -->"
             )
             if starts and starts[0]["offset"] == 0:
-                h = starts[0]
-                loc = f" · {h['location']}" if h["location"] else ""
-                tag = f" `{h['date_norm']}`" if h.get("date_norm") else ""
-                out.append(f"**⮞ Entry — {h['date']}{loc}**{tag}")
+                out.append(f"**⮞ Entry — {_entry_label(starts[0])}**")
+                if len(starts) > 1:
+                    extra = "; ".join(_entry_label(h) for h in starts[1:])
+                    out.append(f"*[+ further entry start(s): {extra}]*")
             elif starts:
-                joined = "; ".join(
-                    f"{h['date']} · {h['location']}" if h["location"] else h["date"]
-                    for h in starts
-                )
+                if last_entry:
+                    out.append(f"*(…continued from {_entry_label(last_entry)})*")
+                joined = "; ".join(_entry_label(h) for h in starts)
                 out.append(f"*[entry start(s) mid-region: {joined}]*")
-            out.append(reg["text"])
+            elif reg["scan_entries"] and last_entry:
+                out.append(f"*(…continued from {_entry_label(last_entry)})*")
+            if starts:
+                last_entry = starts[-1]
+            out.append(_md_safe(reg["text"]))
             out.append("")
     return "\n".join(out)
 
