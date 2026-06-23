@@ -1,128 +1,486 @@
 #!/usr/bin/env python3
-"""Build a text corpus from all processed Laubmann volumes.
+"""Build a metadata-rich text corpus from all processed Laubmann volumes.
 
-Reads regions/*.json from every Laubmann_NN_gemini output directory.
-Excludes: ImageRegion, ObjectRegion, MarginaliaRegion, PageNumberRegion.
+Reads regions/*.json from every Laubmann_NN_gemini output directory and
+reconstructs, per page, the transcribed regions in reading order together with
+their metadata (volume, page id / image id, scan number, page side, region id,
+region type, reading order, line count, detected page number, region-crop path).
+
+It also detects the typical start of a Laubmann journal entry — an underlined
+date immediately followed by an underlined location, e.g.
+
+    <u>28. September 1931</u> <u>Ismaning</u>: ...
+    <u>7. VIII. 31</u>, <u>München</u> ...
+
+and segments each volume's reading-order stream into individual entries.
 
 Usage:
     python build_corpus.py
     python build_corpus.py --output-base "D:/some/other/path"
+    python build_corpus.py --per-volume --include-nontext
+    python build_corpus.py --volumes 1 5 9
 
 Output (written to corpus/ next to this script):
-    corpus/corpus.json   — structured page-by-page corpus
-    corpus/corpus.txt    — flat text with page markers
+    corpus/corpus.md      — metadata-rich Markdown reconstruction (all volumes)
+    corpus/corpus.json    — structured page-by-page corpus + per-region entries
+    corpus/corpus.txt     — flat text with page/entry markers (grep-friendly)
+    corpus/entries.jsonl  — one detected entry per line (full text)
+    corpus/entries.csv    — entry index (cleaned text + preview)
+    corpus/by_volume/Laubmann_NN.md   — only with --per-volume
 """
 
 import argparse
+import csv
 import json
+import re
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 OUTPUT_BASE = Path(r"G:\My Drive\HistOrniGraph_output")
 CORPUS_DIR  = Path(__file__).parent / "corpus"
 
-EXCLUDED = {"ImageRegion", "ObjectRegion", "MarginaliaRegion", "PageNumberRegion"}
+BODY_TEXT_TYPES  = {"ParagraphRegion", "ListRegion", "FootnoteRegion", "TableRegion"}
+ENTRY_SCAN_TYPES = {"ParagraphRegion", "ListRegion"}
+NONTEXT_TYPES    = {"ImageRegion", "ObjectRegion", "MarginaliaRegion"}
+PAGE_META_TYPES  = {"PageNumberRegion"}
 
 
-def _page_sort_key(path: Path) -> tuple:
-    """Sort region JSONs by scan number then L before R."""
-    parts = path.stem.rsplit("_", 2)
-    try:
-        num = int(parts[-2])
-    except (ValueError, IndexError):
-        num = 0
-    side = 0 if parts[-1].upper() == "L" else 1
-    return (num, side)
+# ── Entry-start detection ────────────────────────────────────────────────────
+
+_MONTH_NAME = (
+    r"J[äa]n(?:ner|uar|\.)?|Feb(?:ruar|\.)?|M[äa]r(?:z|\.)?|"
+    r"Apr(?:il|\.)?|Mai|Jun(?:i|\.)?|Jul(?:i|\.)?|Aug(?:ust|\.)?|"
+    r"Sept?(?:ember|\.)?|Okt(?:ober|\.)?|Nov(?:ember|\.)?|Dez(?:ember|\.)?"
+)
+_MONTH_ROMAN  = r"VIII|XII|VII|III|XI|IX|IV|VI|II|X|V|I"
+_MONTH_ARABIC = r"1[0-2]|0?[1-9]"
+_DAY   = r"\d{1,2}\.?"
+_MONTH = rf"(?:{_MONTH_NAME}|(?:{_MONTH_ROMAN})\.?|(?:{_MONTH_ARABIC})\.)"
+_YEAR  = r"(?:1[5-9]\d{2}|20\d{2}|['\u2019]?\d{2})"
+_DATE  = rf"{_DAY}\s*{_MONTH}\.?\s*(?:{_YEAR})?"
+_SEP   = r"[\s,.;:\u2013\u2014/-]*"
+
+ENTRY_2U = re.compile(
+    rf"<u>\s*(?P<date>{_DATE})\s*</u>{_SEP}<u>\s*(?P<loc>[^<>\n]{{1,60}}?)\s*</u>",
+    re.IGNORECASE | re.UNICODE,
+)
+ENTRY_1U = re.compile(
+    rf"<u>\s*(?P<date>{_DATE})\s+(?P<loc>[A-ZÄÖÜ][^<>\n]{{1,40}}?)\s*</u>",
+    re.UNICODE,
+)
+# --loose only: underlined date followed by a bare (un-underlined) capitalised
+# location of up to three tokens — for pages where only the date got underlined.
+ENTRY_LOOSE = re.compile(
+    rf"<u>\s*(?P<date>{_DATE})\s*</u>{_SEP}"
+    r"(?P<loc>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß.\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß.\-]+){0,2})",
+    re.UNICODE,
+)
+_DATE_ONLY     = re.compile(rf"^\s*{_DATE}\s*$", re.IGNORECASE)
+_LOC_BAD_START = re.compile(
+    rf"^\s*(?:(?:{_MONTH_NAME})(?![A-Za-zÄÖÜäöüß])|(?:{_MONTH_ROMAN})\b|\d)",
+    re.IGNORECASE,
+)
+_DATE_PARSE    = re.compile(
+    rf"^\s*(?P<d>\d{{1,2}})\.?\s*(?P<m>{_MONTH})\.?\s*(?P<y>{_YEAR})?", re.IGNORECASE
+)
+
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6,
+          "vii": 7, "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12}
+_MNAME = {"jan": 1, "jän": 1, "feb": 2, "mar": 3, "mär": 3, "apr": 4, "mai": 5,
+          "jun": 6, "jul": 7, "aug": 8, "sep": 9, "okt": 10, "nov": 11, "dez": 12}
+
+_MARKUP_RE = re.compile(r"</?(?:u|sup|sub|b|i|em|strong)\s*>", re.IGNORECASE)
+_WS_RE     = re.compile(r"[ \t]*\n[ \t]*")
 
 
-def build(output_base: Path) -> None:
-    CORPUS_DIR.mkdir(exist_ok=True)
+def _month_to_num(raw: str) -> Optional[int]:
+    s = raw.strip().rstrip(".").lower()
+    if s in _ROMAN:
+        return _ROMAN[s]
+    if s.isdigit():
+        n = int(s)
+        return n if 1 <= n <= 12 else None
+    return _MNAME.get(s[:3])
 
-    volumes = sorted(
-        [
-            d for d in output_base.iterdir()
-            if d.is_dir()
-            and d.name.startswith("Laubmann_")
-            and d.name.endswith("_gemini")
-        ],
-        key=lambda p: int(p.name.split("_")[1]),
-    )
-    print(f"Found {len(volumes)} volume(s).")
 
-    corpus = []
-    total_regions = 0
+def normalize_date(date_raw: str) -> Tuple[Optional[str], Optional[int]]:
+    m = _DATE_PARSE.match(date_raw)
+    if not m:
+        return None, None
+    day = int(m.group("d"))
+    mon = _month_to_num(m.group("m") or "")
+    yraw = (m.group("y") or "").lstrip("'\u2019")
+    year = int(yraw) if len(yraw) == 4 else None
+    if year and mon and 1 <= day <= 31:
+        return f"{year:04d}-{mon:02d}-{day:02d}", year
+    return None, year
 
-    for vol_idx, vol_dir in enumerate(volumes, 1):
-        vol_num = int(vol_dir.name.split("_")[1])
-        regions_dir = vol_dir / "regions"
-        if not regions_dir.exists():
-            print(f"  [{vol_idx:02d}/{len(volumes)}] Vol.{vol_num:02d}  [!] No regions/ dir, skipping.")
+
+def find_entry_starts(text: str, loose: bool = False) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    spans: List[Tuple[int, int]] = []
+    for m in ENTRY_2U.finditer(text):
+        spans.append((m.start(), m.end()))
+        out.append({"offset": m.start(), "end": m.end(),
+                    "date": m.group("date").strip(),
+                    "location": m.group("loc").strip(), "variant": "2U"})
+    for m in ENTRY_1U.finditer(text):
+        if any(m.start() < e and m.end() > s for s, e in spans):
+            continue
+        spans.append((m.start(), m.end()))
+        out.append({"offset": m.start(), "end": m.end(),
+                    "date": m.group("date").strip(),
+                    "location": m.group("loc").strip(), "variant": "1U"})
+    if loose:
+        for m in ENTRY_LOOSE.finditer(text):
+            if any(m.start() < e and m.end() > s for s, e in spans):
+                continue
+            spans.append((m.start(), m.end()))
+            out.append({"offset": m.start(), "end": m.end(),
+                        "date": m.group("date").strip(),
+                        "location": m.group("loc").strip(), "variant": "loose"})
+    clean: List[Dict[str, Any]] = []
+    for h in out:
+        loc = h["location"]
+        if _DATE_ONLY.match(loc) or _LOC_BAD_START.match(loc) or not loc[:1].isalpha():
+            continue
+        dn, yr = normalize_date(h["date"])
+        h["date_norm"], h["year"] = dn, yr
+        clean.append(h)
+    clean.sort(key=lambda h: h["offset"])
+    return clean
+
+
+def strip_markup(text: str) -> str:
+    return _WS_RE.sub(" ", _MARKUP_RE.sub("", text)).strip()
+
+
+# ── Page-id parsing / sorting ────────────────────────────────────────────────
+
+def _parse_pid(stem: str) -> Tuple[int, str]:
+    side = ""
+    base = stem
+    if len(stem) > 2 and stem[-2] == "_" and stem[-1] in "LRlr":
+        side = stem[-1].upper()
+        base = stem[:-2]
+    nums = re.findall(r"\d+", base)
+    scan = int(nums[-1]) if nums else 0
+    return scan, side
+
+
+def _page_sort_key(page_id: str) -> Tuple[int, int]:
+    scan, side = _parse_pid(page_id)
+    return (scan, {"": 0, "L": 0, "R": 1}.get(side, 0))
+
+
+# ── Volume loading ───────────────────────────────────────────────────────────
+
+def _region_text(r: Dict[str, Any]) -> str:
+    tr = r.get("transcription") or {}
+    if tr.get("status") != "success" or tr.get("skipped"):
+        return ""
+    rtype = r.get("type")
+    if rtype in ("ImageRegion", "ObjectRegion"):
+        desc = tr.get("description") or tr.get("text") or ""
+        vis = tr.get("visible_text", "")
+        if vis and vis.lower() != "none":
+            desc = f"{desc}\nText: {vis}".strip()
+        return desc.strip()
+    return (tr.get("text") or "").strip()
+
+
+def _page_number(regions: List[Dict[str, Any]]) -> str:
+    for r in regions:
+        if r.get("type") == "PageNumberRegion":
+            pn = r.get("page_number") or (r.get("transcription") or {}).get("text", "")
+            if pn:
+                return str(pn).strip()
+    return ""
+
+
+def load_volume(vol_dir: Path, include_nontext: bool) -> Tuple[int, List[Dict[str, Any]]]:
+    vol_num = int(vol_dir.name.split("_")[1])
+    regions_dir = vol_dir / "regions"
+    if not regions_dir.exists():
+        return vol_num, []
+
+    json_files = sorted(regions_dir.glob("*.json"), key=lambda p: _page_sort_key(p.stem))
+    pages: List[Dict[str, Any]] = []
+
+    for jf in json_files:
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"  [!] Cannot read {jf.name}: {exc}")
+            continue
+        if not isinstance(data, list):
             continue
 
-        json_files = sorted(
-            [f for f in regions_dir.glob("*.json")],
-            key=_page_sort_key,
-        )
+        page_id = jf.stem
+        scan, _ = _parse_pid(page_id)
+        page_num = _page_number(data)
 
-        vol_pages = 0
-        vol_regions = 0
-
-        for jf in json_files:
-            try:
-                data = json.loads(jf.read_text(encoding="utf-8"))
-            except Exception as e:
-                print(f"  [!] Cannot read {jf.name}: {e}")
+        regions: List[Dict[str, Any]] = []
+        for r in sorted(data, key=lambda r: r.get("reading_order", 99)):
+            rtype = r.get("type", "")
+            if rtype in PAGE_META_TYPES:
                 continue
-
-            regions = [
-                r for r in data
-                if r.get("type") not in EXCLUDED
-                and r.get("transcription", {}).get("status") == "success"
-                and not r.get("transcription", {}).get("skipped")
-            ]
-            regions.sort(key=lambda r: r.get("reading_order", 99))
-            if not regions:
+            if r.get("insert_state") == "folded":
                 continue
-
-            corpus.append({
-                "volume": vol_num,
-                "page_id": jf.stem,
-                "regions": [
-                    {"type": r["type"], "text": r["transcription"]["text"]}
-                    for r in regions
-                ],
+            is_body = rtype in BODY_TEXT_TYPES
+            if not is_body and not (include_nontext and rtype in NONTEXT_TYPES):
+                continue
+            text = _region_text(r)
+            if not text:
+                continue
+            rid = r.get("id", "")
+            regions.append({
+                "id": rid,
+                "type": rtype,
+                "reading_order": r.get("reading_order", len(regions) + 1),
+                "page_side": r.get("page_side", ""),
+                "line_count": r.get("line_count"),
+                "crop": f"regions/{page_id}/{rid}_{rtype}.png",
+                "text": text,
+                "is_body": is_body,
+                "scan_entries": rtype in ENTRY_SCAN_TYPES,
             })
-            vol_pages   += 1
-            vol_regions += len(regions)
+        if regions:
+            pages.append({
+                "page_id": page_id,
+                "image": f"{page_id}.png",
+                "scan": scan,
+                "page_number": page_num,
+                "regions": regions,
+            })
+    return vol_num, pages
 
-        total_regions += vol_regions
-        print(f"  [{vol_idx:02d}/{len(volumes)}] Vol.{vol_num:02d}  {vol_pages} pages, {vol_regions} regions")
 
-    # Write corpus.json
-    out_json = CORPUS_DIR / "corpus.json"
-    out_json.write_text(
-        json.dumps(corpus, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+# ── Entry segmentation over a volume's reading-order stream ──────────────────
 
-    # Write corpus.txt (flat text for human reading / grep)
-    lines = []
-    for page in corpus:
-        lines.append(f"\n=== Vol.{page['volume']:02d}  {page['page_id']} ===")
+def build_stream(pages: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    chunks: List[str] = []
+    units: List[Dict[str, Any]] = []
+    pos = 0
+    for page in pages:
         for reg in page["regions"]:
+            if not reg["scan_entries"]:
+                continue
+            text = reg["text"]
+            units.append({
+                "page_id": page["page_id"], "image": page["image"],
+                "scan": page["scan"], "region_id": reg["id"],
+                "region_type": reg["type"], "reading_order": reg["reading_order"],
+                "start": pos, "end": pos + len(text),
+            })
+            chunks.append(text)
+            pos += len(text) + 2
+    return "\n\n".join(chunks), units
+
+
+def _unit_for_offset(units: List[Dict[str, Any]], offset: int) -> Optional[Dict[str, Any]]:
+    for u in units:
+        if u["start"] <= offset < u["end"] + 2:
+            return u
+    return units[-1] if units else None
+
+
+def segment_entries(vol_num: int, pages: List[Dict[str, Any]],
+                    loose: bool = False) -> List[Dict[str, Any]]:
+    vol_text, units = build_stream(pages)
+    if not units:
+        return []
+    starts = find_entry_starts(vol_text, loose=loose)
+    entries: List[Dict[str, Any]] = []
+    for i, h in enumerate(starts):
+        seg_start = h["offset"]
+        seg_end = starts[i + 1]["offset"] if i + 1 < len(starts) else len(vol_text)
+        raw = vol_text[seg_start:seg_end].strip()
+        clean = strip_markup(raw)
+        u = _unit_for_offset(units, seg_start) or {}
+        entries.append({
+            "entry_id": f"L{vol_num:02d}-e{i + 1:04d}",
+            "volume": vol_num,
+            "scan": u.get("scan"),
+            "page_id": u.get("page_id", ""),
+            "image": u.get("image", ""),
+            "region_id": u.get("region_id", ""),
+            "region_type": u.get("region_type", ""),
+            "reading_order": u.get("reading_order"),
+            "date_raw": h["date"],
+            "date_norm": h.get("date_norm"),
+            "year": h.get("year"),
+            "location_raw": h["location"],
+            "variant": h["variant"],
+            "stream_start": seg_start,
+            "stream_end": seg_end,
+            "n_chars": len(clean),
+            "n_words": len(clean.split()),
+            "text_raw": raw,
+            "text_clean": clean,
+        })
+    return entries
+
+
+# ── Markdown rendering ───────────────────────────────────────────────────────
+
+def render_volume_md(vol_num: int, pages: List[Dict[str, Any]], loose: bool) -> str:
+    out: List[str] = [f"# Laubmann · Vol. {vol_num:02d}", ""]
+    for page in pages:
+        pid, scan, pnum = page["page_id"], page["scan"], page["page_number"]
+        head = f"## Vol. {vol_num:02d} · scan {scan:04d}"
+        if pnum:
+            head += f" · p. {pnum}"
+        out.append(
+            f"<!-- page volume={vol_num} page_id={pid} image={page['image']} "
+            f"scan={scan} page_number={pnum or ''} regions={len(page['regions'])} -->"
+        )
+        out.append(head)
+        out.append(f"`{pid}`")
+        out.append("")
+        for reg in page["regions"]:
+            lc = reg["line_count"]
+            starts = find_entry_starts(reg["text"], loose=loose) if reg["scan_entries"] else []
+            out.append(
+                f"<!-- region id={reg['id']} type={reg['type']} "
+                f"order={reg['reading_order']} side={reg['page_side'] or ''} "
+                f"lines={lc if lc is not None else ''} entries={len(starts)} "
+                f"crop={reg['crop']} -->"
+            )
+            if starts and starts[0]["offset"] == 0:
+                h = starts[0]
+                tag = f" `{h['date_norm']}`" if h.get("date_norm") else ""
+                out.append(f"**⮞ Entry — {h['date']} · {h['location']}**{tag}")
+            elif starts:
+                joined = "; ".join(f"{h['date']} · {h['location']}" for h in starts)
+                out.append(f"*[entry start(s) mid-region: {joined}]*")
+            out.append(reg["text"])
+            out.append("")
+    return "\n".join(out)
+
+
+def render_txt(vol_num: int, pages: List[Dict[str, Any]], loose: bool) -> List[str]:
+    lines: List[str] = []
+    for page in pages:
+        lines.append(f"\n=== Vol.{vol_num:02d}  scan {page['scan']:04d}  {page['page_id']} ===")
+        for reg in page["regions"]:
+            if reg["scan_entries"]:
+                for h in find_entry_starts(reg["text"], loose=loose):
+                    lines.append(f"--- ENTRY  {h['date']}  |  {h['location']} ---")
             lines.append(reg["text"])
             lines.append("")
-    (CORPUS_DIR / "corpus.txt").write_text("\n".join(lines), encoding="utf-8")
+    return lines
 
-    print(f"\nCorpus: {len(corpus)} pages, {total_regions} regions")
-    print(f"  → {out_json}")
-    print(f"  → {CORPUS_DIR / 'corpus.txt'}")
+
+# ── Driver ───────────────────────────────────────────────────────────────────
+
+def build(output_base: Path, corpus_dir: Path, per_volume: bool,
+          include_nontext: bool, loose: bool, only_volumes: Optional[List[int]]) -> None:
+    corpus_dir.mkdir(parents=True, exist_ok=True)
+
+    vol_dirs = sorted(
+        [d for d in output_base.iterdir()
+         if d.is_dir() and d.name.startswith("Laubmann_") and d.name.endswith("_gemini")],
+        key=lambda p: int(p.name.split("_")[1]),
+    )
+    if only_volumes:
+        vol_dirs = [d for d in vol_dirs if int(d.name.split("_")[1]) in set(only_volumes)]
+    print(f"Found {len(vol_dirs)} volume(s).")
+
+    corpus_json: List[Dict[str, Any]] = []
+    all_entries: List[Dict[str, Any]] = []
+    md_parts: List[str] = []
+    txt_lines: List[str] = []
+    by_vol_dir = corpus_dir / "by_volume"
+    if per_volume:
+        by_vol_dir.mkdir(exist_ok=True)
+
+    total_pages = total_regions = 0
+
+    for vi, vol_dir in enumerate(vol_dirs, 1):
+        vol_num, pages = load_volume(vol_dir, include_nontext)
+        if not pages:
+            print(f"  [{vi:02d}/{len(vol_dirs)}] Vol.{vol_num:02d}  [!] no usable regions, skipping.")
+            continue
+
+        entries = segment_entries(vol_num, pages, loose=loose)
+        all_entries.extend(entries)
+
+        for page in pages:
+            page_regions = []
+            for reg in page["regions"]:
+                starts = find_entry_starts(reg["text"], loose=loose) if reg["scan_entries"] else []
+                page_regions.append({
+                    "id": reg["id"], "type": reg["type"],
+                    "reading_order": reg["reading_order"],
+                    "page_side": reg["page_side"], "line_count": reg["line_count"],
+                    "crop": reg["crop"], "text": reg["text"],
+                    "entry_starts": [
+                        {"date": h["date"], "location": h["location"],
+                         "date_norm": h.get("date_norm"), "offset": h["offset"]}
+                        for h in starts
+                    ],
+                })
+            corpus_json.append({
+                "volume": vol_num, "page_id": page["page_id"], "image": page["image"],
+                "scan": page["scan"], "page_number": page["page_number"],
+                "regions": page_regions,
+            })
+
+        md = render_volume_md(vol_num, pages, loose)
+        md_parts.append(md)
+        txt_lines.extend(render_txt(vol_num, pages, loose))
+        if per_volume:
+            (by_vol_dir / f"Laubmann_{vol_num:02d}.md").write_text(md, encoding="utf-8")
+
+        n_regions = sum(len(p["regions"]) for p in pages)
+        total_pages += len(pages)
+        total_regions += n_regions
+        print(f"  [{vi:02d}/{len(vol_dirs)}] Vol.{vol_num:02d}  "
+              f"{len(pages)} pages, {n_regions} regions, {len(entries)} entries")
+
+    (corpus_dir / "corpus.json").write_text(
+        json.dumps(corpus_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    (corpus_dir / "corpus.md").write_text("\n\n".join(md_parts), encoding="utf-8")
+    (corpus_dir / "corpus.txt").write_text("\n".join(txt_lines), encoding="utf-8")
+
+    with (corpus_dir / "entries.jsonl").open("w", encoding="utf-8") as fh:
+        for e in all_entries:
+            fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    csv_cols = ["entry_id", "volume", "scan", "page_id", "image", "region_id",
+                "region_type", "reading_order", "date_raw", "date_norm", "year",
+                "location_raw", "variant", "n_chars", "n_words", "preview", "text_clean"]
+    with (corpus_dir / "entries.csv").open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=csv_cols, extrasaction="ignore")
+        w.writeheader()
+        for e in all_entries:
+            row = dict(e)
+            row["preview"] = (e["text_clean"][:120] + "…") if len(e["text_clean"]) > 120 else e["text_clean"]
+            w.writerow(row)
+
+    print(f"\nCorpus: {total_pages} pages, {total_regions} regions, {len(all_entries)} entries")
+    for name in ("corpus.md", "corpus.json", "corpus.txt", "entries.jsonl", "entries.csv"):
+        print(f"  → {corpus_dir / name}")
+    if per_volume:
+        print(f"  → {by_vol_dir}/Laubmann_NN.md")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument(
-        "--output-base", type=Path, default=OUTPUT_BASE,
-        help="Root dir containing Laubmann_NN_gemini folders",
-    )
+    ap.add_argument("--output-base", type=Path, default=OUTPUT_BASE,
+                    help="Root dir containing Laubmann_NN_gemini folders")
+    ap.add_argument("--corpus-dir", type=Path, default=CORPUS_DIR,
+                    help="Where to write the corpus (default: corpus/ next to this script)")
+    ap.add_argument("--per-volume", action="store_true",
+                    help="Also write one Markdown file per volume under corpus/by_volume/")
+    ap.add_argument("--include-nontext", action="store_true",
+                    help="Include Image/Object/Marginalia region descriptions in the body")
+    ap.add_argument("--loose", action="store_true",
+                    help="Also match entries where only the date is underlined and "
+                         "the location is a following bare capitalised word")
+    ap.add_argument("--volumes", type=int, nargs="*", default=None,
+                    help="Restrict to specific volume numbers, e.g. --volumes 1 5 9")
     args = ap.parse_args()
-    build(args.output_base)
+    build(args.output_base, args.corpus_dir, args.per_volume,
+          args.include_nontext, args.loose, args.volumes)
