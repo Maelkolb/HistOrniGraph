@@ -6,11 +6,12 @@ reconstructs, per page, the transcribed regions in reading order together with
 their metadata (volume, page id / image id, scan number, page side, region id,
 region type, reading order, line count, detected page number, region-crop path).
 
-It also detects the typical start of a Laubmann journal entry — an underlined
-date immediately followed by an underlined location, e.g.
+It also detects the typical start of a Laubmann journal entry — a line-initial
+date (with a year) whose location may be underlined or plain, e.g.
 
-    <u>28. September 1931</u> <u>Ismaning</u>: ...
-    <u>7. VIII. 31</u>, <u>München</u> ...
+    7. April 1917. <u>München</u>.
+    30. Juli 1960. München.
+    26. I. 48 Karlsfeld
 
 and segments each volume's reading-order stream into individual entries.
 
@@ -46,42 +47,54 @@ PAGE_META_TYPES  = {"PageNumberRegion"}
 
 
 # ── Entry-start detection ────────────────────────────────────────────────────
+# A Laubmann entry header is a LINE-INITIAL date (with a year), e.g.
+#
+#     7. April 1917. <u>München</u>.        ← location underlined
+#     30. Juli 1960. München.               ← location plain
+#     26. I. 48 Karlsfeld                   ← roman month, 2-digit year, plain loc
+#     10. August 1938.                      ← date only (no location on the line)
+#
+# The date is the reliable anchor (almost never underlined); the location may be
+# underlined or plain.  A date inside running prose is NOT a header — those are
+# rejected because a lowercase word (or "," / ";") follows the date.
 
 _MONTH_NAME = (
-    r"J[äa]n(?:ner|uar|\.)?|Feb(?:ruar|\.)?|M[äa]r(?:z|\.)?|"
-    r"Apr(?:il|\.)?|Mai|Jun(?:i|\.)?|Jul(?:i|\.)?|Aug(?:ust|\.)?|"
-    r"Sept?(?:ember|\.)?|Okt(?:ober|\.)?|Nov(?:ember|\.)?|Dez(?:ember|\.)?"
+    r"J[äa]n(?:ner|uar|\.)?|Feb(?:ruar|\.)?|M[äa]r(?:z|\.)?|Apr(?:il|\.)?|Mai|"
+    r"Jun[i]?|Jul[i]?|Aug(?:ust|\.)?|Sept?(?:ember|\.)?|Okt(?:ober|\.)?|"
+    r"Nov(?:ember|\.)?|Dez(?:ember|\.)?"
 )
-_MONTH_ROMAN  = r"VIII|XII|VII|III|XI|IX|IV|VI|II|X|V|I"
-_MONTH_ARABIC = r"1[0-2]|0?[1-9]"
-_DAY   = r"\d{1,2}\.?"
-_MONTH = rf"(?:{_MONTH_NAME}|(?:{_MONTH_ROMAN})\.?|(?:{_MONTH_ARABIC})\.)"
-_YEAR  = r"(?:1[5-9]\d{2}|20\d{2}|['\u2019]?\d{2})"
-_DATE  = rf"{_DAY}\s*{_MONTH}\.?\s*(?:{_YEAR})?"
-_SEP   = r"[\s,.;:\u2013\u2014/-]*"
+_MONTH_ROMAN = r"VIII|XII|VII|III|XI|IX|IV|VI|II|X|V|I"
+_MONTH = rf"(?:{_MONTH_NAME}|(?:{_MONTH_ROMAN})\.?)"
+_DAY   = r"\d{1,2}\."
+_YEAR  = r"(?:1[5-9]\d{2}|20\d{2}|\d{2})"
+# Date with a required year (strict).  ``[\s.]*`` lets a stray period sit between
+# month and year, e.g. "21. August. 1917".
+_DATEY = rf"{_DAY}\s*{_MONTH}[\s.]*{_YEAR}"
+# Date with an optional year (used only with --loose; lower precision).
+_DATE  = rf"{_DAY}\s*{_MONTH}[\s.]*(?:{_YEAR})?"
 
-ENTRY_2U = re.compile(
-    rf"<u>\s*(?P<date>{_DATE})\s*</u>{_SEP}<u>\s*(?P<loc>[^<>\n]{{1,60}}?)\s*</u>",
-    re.IGNORECASE | re.UNICODE,
-)
-ENTRY_1U = re.compile(
-    rf"<u>\s*(?P<date>{_DATE})\s+(?P<loc>[A-ZÄÖÜ][^<>\n]{{1,40}}?)\s*</u>",
-    re.UNICODE,
-)
-# --loose only: underlined date followed by a bare (un-underlined) capitalised
-# location of up to three tokens — for pages where only the date got underlined.
-ENTRY_LOOSE = re.compile(
-    rf"<u>\s*(?P<date>{_DATE})\s*</u>{_SEP}"
-    r"(?P<loc>[A-ZÄÖÜ][A-Za-zÄÖÜäöüß.\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß.\-]+){0,2})",
-    re.UNICODE,
-)
-_DATE_ONLY     = re.compile(rf"^\s*{_DATE}\s*$", re.IGNORECASE)
-_LOC_BAD_START = re.compile(
-    rf"^\s*(?:(?:{_MONTH_NAME})(?![A-Za-zÄÖÜäöüß])|(?:{_MONTH_ROMAN})\b|\d)",
+
+def _header_re(year_required: bool) -> "re.Pattern":
+    date = _DATEY if year_required else _DATE
+    return re.compile(
+        rf"^[ \t]*(?:<u>[ \t]*)?(?P<date>(?i:{date}))[ \t]*(?:</u>)?[ \t]*"
+        rf"[.:]?(?P<rest>[^\n]*)$",
+        re.MULTILINE,
+    )
+
+
+HEADER_STRICT = _header_re(True)
+HEADER_LOOSE  = _header_re(False)
+
+_U_FIRST  = re.compile(r"^<u>\s*(.*?)\s*</u>")
+_WEEKDAY  = re.compile(
+    r"(?:Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonnabend|Sonntag)",
     re.IGNORECASE,
 )
-_DATE_PARSE    = re.compile(
-    rf"^\s*(?P<d>\d{{1,2}})\.?\s*(?P<m>{_MONTH})\.?\s*(?P<y>{_YEAR})?", re.IGNORECASE
+_WD_LEAD  = re.compile(rf"^{_WEEKDAY.pattern}\b\.?,?\s*", re.IGNORECASE)
+
+_DATE_PARSE = re.compile(
+    rf"^\s*(?P<d>\d{{1,2}})\.?\s*(?P<m>{_MONTH})[\s.]*(?P<y>{_YEAR})?", re.IGNORECASE
 )
 
 _ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6,
@@ -104,51 +117,67 @@ def _month_to_num(raw: str) -> Optional[int]:
 
 
 def normalize_date(date_raw: str) -> Tuple[Optional[str], Optional[int]]:
+    """Best-effort ISO date.  2-digit years are read as 19xx — Laubmann's diary
+    is entirely 20th-century, so "48" → 1948, "03" → 1903."""
     m = _DATE_PARSE.match(date_raw)
     if not m:
         return None, None
     day = int(m.group("d"))
     mon = _month_to_num(m.group("m") or "")
-    yraw = (m.group("y") or "").lstrip("'\u2019")
-    year = int(yraw) if len(yraw) == 4 else None
+    yraw = m.group("y") or ""
+    if len(yraw) == 4:
+        year: Optional[int] = int(yraw)
+    elif len(yraw) == 2:
+        year = 1900 + int(yraw)
+    else:
+        year = None
     if year and mon and 1 <= day <= 31:
         return f"{year:04d}-{mon:02d}-{day:02d}", year
     return None, year
 
 
+def _extract_location(rest: str) -> Optional[str]:
+    """Pull the location out of the text after a date header.
+
+    Returns "" for a date-only header, or None when the line is actually prose
+    (a lowercase word / "," / ";" follows the date) and must be rejected.
+    """
+    r = rest.strip().lstrip(".:").strip()
+    if not r:
+        return ""
+    if r[0].islower() or r[0] in ",;":
+        return None
+    r = _WD_LEAD.sub("", r).strip()          # Laubmann sometimes notes the weekday
+    if not r or r[0].islower():
+        return ""
+    m = _U_FIRST.match(r)
+    if m:
+        loc = m.group(1)
+    else:
+        loc = re.split(r"\.(?:\s|$)", r, maxsplit=1)[0]
+        loc = re.split(r"\s{2,}|\t", loc)[0]
+    loc = loc.strip().strip('"').rstrip(".").strip()
+    if loc and (not loc[0].isalpha() or _WEEKDAY.fullmatch(loc)):
+        return ""
+    return loc
+
+
 def find_entry_starts(text: str, loose: bool = False) -> List[Dict[str, Any]]:
+    rx = HEADER_LOOSE if loose else HEADER_STRICT
     out: List[Dict[str, Any]] = []
-    spans: List[Tuple[int, int]] = []
-    for m in ENTRY_2U.finditer(text):
-        spans.append((m.start(), m.end()))
-        out.append({"offset": m.start(), "end": m.end(),
-                    "date": m.group("date").strip(),
-                    "location": m.group("loc").strip(), "variant": "2U"})
-    for m in ENTRY_1U.finditer(text):
-        if any(m.start() < e and m.end() > s for s, e in spans):
+    for m in rx.finditer(text):
+        loc = _extract_location(m.group("rest"))
+        if loc is None:
             continue
-        spans.append((m.start(), m.end()))
-        out.append({"offset": m.start(), "end": m.end(),
-                    "date": m.group("date").strip(),
-                    "location": m.group("loc").strip(), "variant": "1U"})
-    if loose:
-        for m in ENTRY_LOOSE.finditer(text):
-            if any(m.start() < e and m.end() > s for s, e in spans):
-                continue
-            spans.append((m.start(), m.end()))
-            out.append({"offset": m.start(), "end": m.end(),
-                        "date": m.group("date").strip(),
-                        "location": m.group("loc").strip(), "variant": "loose"})
-    clean: List[Dict[str, Any]] = []
-    for h in out:
-        loc = h["location"]
-        if _DATE_ONLY.match(loc) or _LOC_BAD_START.match(loc) or not loc[:1].isalpha():
-            continue
-        dn, yr = normalize_date(h["date"])
-        h["date_norm"], h["year"] = dn, yr
-        clean.append(h)
-    clean.sort(key=lambda h: h["offset"])
-    return clean
+        date = re.sub(r"\s+", " ", m.group("date").strip())
+        rest_l = m.group("rest").strip().lstrip(".:").strip()
+        variant = ("date-only" if not loc
+                   else "underlined" if rest_l.startswith("<u>") else "plain")
+        dn, yr = normalize_date(date)
+        out.append({"offset": m.start(), "end": m.end(), "date": date,
+                    "location": loc, "date_norm": dn, "year": yr,
+                    "variant": variant})
+    return out
 
 
 def strip_markup(text: str) -> str:
@@ -349,10 +378,14 @@ def render_volume_md(vol_num: int, pages: List[Dict[str, Any]], loose: bool) -> 
             )
             if starts and starts[0]["offset"] == 0:
                 h = starts[0]
+                loc = f" · {h['location']}" if h["location"] else ""
                 tag = f" `{h['date_norm']}`" if h.get("date_norm") else ""
-                out.append(f"**⮞ Entry — {h['date']} · {h['location']}**{tag}")
+                out.append(f"**⮞ Entry — {h['date']}{loc}**{tag}")
             elif starts:
-                joined = "; ".join(f"{h['date']} · {h['location']}" for h in starts)
+                joined = "; ".join(
+                    f"{h['date']} · {h['location']}" if h["location"] else h["date"]
+                    for h in starts
+                )
                 out.append(f"*[entry start(s) mid-region: {joined}]*")
             out.append(reg["text"])
             out.append("")
@@ -477,8 +510,8 @@ if __name__ == "__main__":
     ap.add_argument("--include-nontext", action="store_true",
                     help="Include Image/Object/Marginalia region descriptions in the body")
     ap.add_argument("--loose", action="store_true",
-                    help="Also match entries where only the date is underlined and "
-                         "the location is a following bare capitalised word")
+                    help="Also detect date headers that omit the year "
+                         "(higher recall, lower precision)")
     ap.add_argument("--volumes", type=int, nargs="*", default=None,
                     help="Restrict to specific volume numbers, e.g. --volumes 1 5 9")
     args = ap.parse_args()
